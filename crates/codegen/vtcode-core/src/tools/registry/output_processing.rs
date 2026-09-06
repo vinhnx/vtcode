@@ -152,6 +152,45 @@ impl ToolRegistry {
     pub(super) async fn process_tool_output(
         &self,
         tool_name: &str,
+        value: Value,
+        is_mcp: bool,
+        max_output_tokens: usize,
+    ) -> Value {
+        let processed = self
+            .process_tool_output_inner(tool_name, value, is_mcp, max_output_tokens)
+            .await;
+        self.enforce_turn_preview_budget(processed)
+    }
+
+    /// Enforce the aggregate provider-visible preview budget for the turn.
+    ///
+    /// Per-result preview limiting (above) bounds one response; this bound
+    /// covers the whole turn: once `TURN_PREVIEW_BUDGET_BYTES` worth of
+    /// payload bodies has been emitted, later responses keep outcome/control
+    /// metadata while payload bodies are truncated to the remaining budget
+    /// and then omitted, marked with `preview_budget_exhausted`.
+    fn enforce_turn_preview_budget(&self, mut value: Value) -> Value {
+        const BUDGET_BYTES: usize = vtcode_config::constants::output_limits::TURN_PREVIEW_BUDGET_BYTES;
+
+        let body_bytes = payload_body_bytes(&value);
+        if body_bytes == 0 {
+            return value;
+        }
+
+        let previous = self.charge_turn_preview_bytes(body_bytes);
+        if previous >= BUDGET_BYTES {
+            strip_payload_bodies(&mut value);
+            return value;
+        }
+        if previous + body_bytes > BUDGET_BYTES {
+            truncate_payload_bodies(&mut value, BUDGET_BYTES - previous);
+        }
+        value
+    }
+
+    async fn process_tool_output_inner(
+        &self,
+        tool_name: &str,
         mut value: Value,
         is_mcp: bool,
         max_output_tokens: usize,
@@ -244,6 +283,56 @@ impl ToolRegistry {
 
         Self::sanitize_tool_output(value, is_mcp, max_output_tokens)
     }
+}
+
+/// Provider-visible payload-body fields counted against the per-turn preview
+/// budget. Outcome/control metadata (exit codes, spool paths, truncation
+/// flags) is never counted and never stripped.
+const PAYLOAD_BODY_FIELDS: [&str; 5] = ["output", "preview", "content", "stdout", "stderr"];
+
+fn payload_body_bytes(value: &Value) -> usize {
+    PAYLOAD_BODY_FIELDS
+        .iter()
+        .filter_map(|field| value.get(*field).and_then(Value::as_str))
+        .map(str::len)
+        .sum()
+}
+
+fn strip_payload_bodies(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    for field in PAYLOAD_BODY_FIELDS {
+        object.remove(field);
+    }
+    object.insert("preview_budget_exhausted".to_string(), Value::Bool(true));
+}
+
+fn truncate_payload_bodies(value: &mut Value, remaining_bytes: usize) {
+    let mut remaining = remaining_bytes;
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    for field in PAYLOAD_BODY_FIELDS {
+        let Some(text) = object.get(field).and_then(Value::as_str) else {
+            continue;
+        };
+        if remaining == 0 {
+            object.remove(field);
+            continue;
+        }
+        if text.len() <= remaining {
+            remaining -= text.len();
+            continue;
+        }
+        let mut end = remaining;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        object.insert(field.to_string(), Value::String(text[..end].to_string()));
+        remaining = 0;
+    }
+    object.insert("preview_budget_exhausted".to_string(), Value::Bool(true));
 }
 
 #[cfg(test)]
@@ -394,6 +483,62 @@ mod tests {
         assert!(result.get("note").is_none());
     }
 
+    #[tokio::test]
+    async fn turn_preview_budget_truncates_then_strips_payload_bodies() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = ToolRegistry::new(temp.path().to_path_buf()).await;
+        // 8 KiB bodies stay under the spooler threshold while five of them
+        // exceed the 32 KiB aggregate turn budget.
+        let body = "x".repeat(8_000);
+
+        for _ in 0..4 {
+            let result = registry
+                .process_tool_output("grep_file", json!({ "success": true, "output": body.clone() }), false, 100_000)
+                .await;
+            assert_eq!(result["output"].as_str().unwrap().len(), body.len());
+            assert!(result.get("preview_budget_exhausted").is_none());
+        }
+
+        let fifth = registry
+            .process_tool_output("grep_file", json!({ "success": true, "output": body.clone() }), false, 100_000)
+            .await;
+        let fifth_len = fifth["output"].as_str().unwrap().len();
+        assert!(
+            fifth_len > 0 && fifth_len < body.len(),
+            "fifth response should be truncated to the remaining turn budget, got {fifth_len}"
+        );
+        assert_eq!(fifth["preview_budget_exhausted"], true);
+
+        let sixth = registry
+            .process_tool_output("grep_file", json!({ "success": true, "output": body }), false, 100_000)
+            .await;
+        assert!(sixth.get("output").is_none(), "payload body should be stripped once exhausted");
+        assert_eq!(sixth["preview_budget_exhausted"], true);
+        assert_eq!(sixth["success"], true, "outcome metadata must survive the strip");
+    }
+
+    #[tokio::test]
+    async fn turn_preview_budget_resets_between_turns() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = ToolRegistry::new(temp.path().to_path_buf()).await;
+        let body = "x".repeat(8_000);
+
+        for _ in 0..5 {
+            registry
+                .process_tool_output("grep_file", json!({ "success": true, "output": body.clone() }), false, 100_000)
+                .await;
+        }
+        registry.begin_turn_preview_window();
+
+        let after_reset = registry
+            .process_tool_output("grep_file", json!({ "success": true, "output": body }), false, 100_000)
+            .await;
+        assert_eq!(
+            after_reset["output"].as_str().unwrap().len(),
+            body.len(),
+            "a fresh turn window must accept the payload again"
+        );
+    }
     #[tokio::test]
     async fn small_pty_response_redacts_inline_secrets() {
         let temp = tempfile::tempdir().unwrap();

@@ -154,6 +154,7 @@ impl ToolRegistry {
             .await?;
         let input = crate::tools::command_args::interactive_input_text(&args)
             .ok_or_else(|| anyhow!("input is required for command session write"))?;
+        enforce_exec_input_line_policy(input)?;
 
         let yield_time_ms = clamp_exec_yield_ms(payload.get("yield_time_ms").and_then(Value::as_u64), 250);
         let max_tokens = max_output_tokens_from_payload(payload)

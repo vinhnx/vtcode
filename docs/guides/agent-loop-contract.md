@@ -277,6 +277,13 @@ returned session ID is reusable for a later wait. Wait time is excluded from
 the ordinary per-turn harness wall-clock budget, while cancellation, shutdown,
 safety policy, and the configured long-running-command ceiling remain active.
 
+Session input is policy-checked: each submitted line is evaluated against the
+same PTY deny list that guards session creation, so a denied interactive
+program cannot be launched by typing into an already-running session. The
+`unified_exec` `action: "code"` path is likewise subject to the command policy
+through its interpreter program (`python3`/`node`); it cannot bypass a policy
+that excludes those programs.
+
 Command responses never expose unbounded accumulated `raw_output`. They return
 a bounded preview plus total bytes, truncation state, exit state, and a spool
 path when the output file is available. `spool_complete` is false while an
@@ -290,7 +297,11 @@ commands preserve the tail. The complete spool, byte counts, reference
 metadata, and failure or recovery diagnostics remain available without
 reopening the spool while the response is constructed.
 
-Across a turn, provider-visible tool previews are capped at 32 KiB. Once that
+Across a turn, provider-visible tool previews are capped at 32 KiB. The
+budget is enforced twice: at the tool-registry output boundary (which charges
+each response's payload bodies and truncates or strips them, marked with
+`preview_budget_exhausted`) and again by the unified runloop when responses
+enter provider-facing history. Once that
 aggregate budget is exhausted, VTCode retains bounded outcome and control
 metadata while omitting payload bodies. A successful verifier therefore stays
 authoritative without encouraging duplicate reads or checks. Blocker live

@@ -210,9 +210,6 @@ pub trait ToolSession: Send + Sync {
 
     /// Get user's configured shell
     fn user_shell(&self) -> &str;
-
-    /// Send an event
-    async fn send_event(&self, event: ToolEvent);
 }
 
 /// Turn context for tool execution
@@ -290,51 +287,6 @@ pub enum FileChange {
     Delete,
     Update { old_content: String, new_content: String },
     Rename { new_path: PathBuf, content: Option<String> },
-}
-
-/// Tool execution events (from Codex)
-#[derive(Clone, Debug)]
-pub enum ToolEvent {
-    Begin(ToolEventBegin),
-    Success(ToolEventSuccess),
-    Failure(ToolEventFailure),
-    PatchApplyBegin(PatchApplyBeginEvent),
-    PatchApplyEnd(PatchApplyEndEvent),
-}
-
-#[derive(Clone, Debug)]
-pub struct ToolEventBegin {
-    pub call_id: String,
-    pub tool_name: String,
-    pub turn_id: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct ToolEventSuccess {
-    pub call_id: String,
-    pub output: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct ToolEventFailure {
-    pub call_id: String,
-    pub error: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct PatchApplyBeginEvent {
-    pub call_id: String,
-    pub turn_id: String,
-    pub changes: HashMap<PathBuf, FileChange>,
-    pub auto_approved: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct PatchApplyEndEvent {
-    pub call_id: String,
-    pub success: bool,
-    pub stdout: String,
-    pub stderr: String,
 }
 
 /// Error type for tool execution (from Codex)

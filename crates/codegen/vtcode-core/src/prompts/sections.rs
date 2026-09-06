@@ -4,69 +4,6 @@ pub(crate) enum SectionBoundaryMode {
     BracketOrMarkdown,
 }
 
-/// Identifies which layer of the system prompt a `PromptSection` belongs to.
-///
-/// Variants mirror the layers `compose_system_instruction_text` actually
-/// assembles today. Agent identity is not a separate variant: it is applied
-/// as an in-place text substitution on the base contract (title/intro lines)
-/// rather than an appended section, so it is folded into [`Self::BaseContract`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SectionKind {
-    /// Canonical contract + operating profile (with any workspace prompt-layer
-    /// override/append and agent-identity substitution already applied).
-    /// Always present and never trimmed to satisfy the token budget.
-    BaseContract,
-    /// Optional `<analysis>/<reasoning_plan>/<uncertainty>/<verification>` tagging
-    /// guidance. Advisory; trimmed first when over budget.
-    StructuredReasoning,
-    /// Lean "## Skills" routing section rendered from available skill
-    /// metadata. Advisory; trimmed alongside structured reasoning.
-    Skills,
-    /// "## Environment" addenda (languages, interaction mode, MCP sources,
-    /// temporal context, working directory).
-    EnvironmentAddenda,
-    /// "## Active Tools" dynamic tool guidance derived from the active tool
-    /// catalog.
-    ToolGuidelines,
-    /// "## Shell Profile" guidance for the current command environment.
-    ShellProfile,
-}
-
-impl SectionKind {
-    /// Static section name used in [`crate::prompts::SystemPromptReport::trimmed_sections`].
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::BaseContract => "base_contract",
-            Self::StructuredReasoning => "structured_reasoning",
-            Self::Skills => "skills",
-            Self::EnvironmentAddenda => "environment_addenda",
-            Self::ToolGuidelines => "tool_guidelines",
-            Self::ShellProfile => "shell_profile",
-        }
-    }
-
-    /// Trim order: lower values are dropped first. `None` means the section
-    /// is never dropped to satisfy the token budget.
-    pub const fn trim_priority(self) -> Option<u8> {
-        match self {
-            Self::StructuredReasoning => Some(0),
-            Self::Skills => Some(1),
-            Self::EnvironmentAddenda => Some(2),
-            Self::ShellProfile => Some(3),
-            Self::ToolGuidelines => Some(4),
-            Self::BaseContract => None,
-        }
-    }
-}
-
-/// A single layer of the composed system prompt, carrying its logical kind
-/// and rendered text.
-#[allow(dead_code, reason = "Intentional compatibility, platform, or test-only suppression.")]
-pub(crate) struct PromptSection {
-    pub(crate) kind: SectionKind,
-    pub(crate) text: String,
-}
-
 pub(crate) fn find_prompt_section_bounds(
     prompt: &str,
     section_header: &str,

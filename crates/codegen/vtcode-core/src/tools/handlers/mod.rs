@@ -127,10 +127,9 @@ pub use task_tracker::TaskTrackerTool;
 pub use router::{DispatchRegistry, DispatchRegistryBuilder, ToolCall, ToolRouter, ToolRouterProvider};
 pub use tool_handler::{
     AdditionalProperties, ApprovalPolicy, ConfiguredToolSpec, Constrained, ContentItem, DiffTracker, FreeformTool,
-    FreeformToolFormat, JsonSchema, McpToolResult, PatchApplyBeginEvent, PatchApplyEndEvent, ResponsesApiTool,
-    SandboxPermissions, SharedDiffTracker, ShellEnvironmentPolicy, ShellToolCallParams, ToolCallError, ToolEvent,
-    ToolEventBegin, ToolEventFailure, ToolEventSuccess, ToolHandler, ToolInvocation, ToolKind, ToolOutput, ToolPayload,
-    ToolSession, ToolSpec, TurnContext,
+    FreeformToolFormat, JsonSchema, McpToolResult, ResponsesApiTool, SandboxPermissions, SharedDiffTracker,
+    ShellEnvironmentPolicy, ShellToolCallParams, ToolCallError, ToolHandler, ToolInvocation, ToolKind, ToolOutput,
+    ToolPayload, ToolSession, ToolSpec, TurnContext,
 };
 
 // Legacy FileChange re-export for backward compatibility

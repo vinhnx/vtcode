@@ -691,6 +691,7 @@ pub(crate) async fn run_turn_loop(
     // the session loop.
     ctx.renderer.flush_compact_command_group();
     ctx.set_phase(TurnPhase::Preparing);
+    ctx.tool_registry.begin_turn_preview_window();
     if let Some(Err(e)) = ctx.harness_emitter.map(|e| e.emit(turn_started_event())) {
         tracing::debug!(error = %e, "harness turn_started event emission failed");
     }

@@ -18,8 +18,8 @@ use serde_json::Value;
 use vtcode_commons::serde_helpers::json_to_string_pretty;
 
 use super::tool_handler::{
-    ApprovalPolicy, Constrained, ShellEnvironmentPolicy, ToolCallError, ToolEvent, ToolHandler, ToolInvocation,
-    ToolKind, ToolOutput, ToolPayload, ToolSession, ToolSpec, TurnContext,
+    ApprovalPolicy, Constrained, ShellEnvironmentPolicy, ToolCallError, ToolHandler, ToolInvocation, ToolKind,
+    ToolOutput, ToolPayload, ToolSession, ToolSpec, TurnContext,
 };
 use crate::tool_policy::ToolPolicy;
 use crate::tools::result::ToolResult as SplitToolResult;
@@ -253,21 +253,6 @@ impl ToolSession for DefaultToolSession {
 
     fn user_shell(&self) -> &str {
         &self.shell
-    }
-
-    async fn send_event(&self, event: ToolEvent) {
-        match event {
-            ToolEvent::Begin(e) => {
-                tracing::debug!(tool = %e.tool_name, call_id = %e.call_id, "Tool execution started");
-            }
-            ToolEvent::Success(e) => {
-                tracing::debug!(call_id = %e.call_id, "Tool execution succeeded");
-            }
-            ToolEvent::Failure(e) => {
-                tracing::warn!(call_id = %e.call_id, error = %e.error, "Tool execution failed");
-            }
-            _ => {}
-        }
     }
 }
 

@@ -452,6 +452,8 @@ impl ToolRegistry {
     }
 
     async fn execute_code(&self, args: Value) -> Result<Value> {
+        acquire_executor_rate_limit("unified_exec:code", 2.0)?;
+
         let code = args
             .get("command")
             .or_else(|| args.get("code"))
@@ -459,6 +461,14 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow!("Missing code/command in execute_code"))?;
 
         let language = code_language_from_args(&args);
+
+        // The `code` action spawns the interpreter directly, so it must clear
+        // the same command policy as `run`: a policy that excludes
+        // `python3`/`node` must not be bypassed through code mode.
+        let interpreter = language.interpreter().to_string();
+        if !self.inventory.command_policy_allows(std::slice::from_ref(&interpreter)) {
+            return Err(anyhow!("code execution via '{interpreter}' is not permitted by the execution policy"));
+        }
 
         let track_files = args.get("track_files").and_then(|v| v.as_bool()).unwrap_or(false);
 

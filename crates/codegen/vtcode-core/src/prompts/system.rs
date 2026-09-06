@@ -1877,8 +1877,6 @@ Use tags when helpful: `<analysis>` facts/options, `<reasoning_plan>` advisory s
 - Use `exec_command.cmd` with `ls`, `rg`, `find`, `cat`, `sed`, and `awk` for repository browsing.
 - Batch independent read-only calls; order dependent reads, and serialize mutations.
 - Use `exec_command.cmd` for build tools, test tools, `git diff -- <path>`, and shell-only tasks. In one-shot `exec_command` calls, do not use `!!`, `!$`, `!ssh`, or `fc`; write full command arguments explicitly from conversation or tool results. Interactive shells: review-safe history expansion (Bash `histverify`, zsh `HIST_VERIFY`).
-- Diagnose from evidence; never bypass safeguards.
-- Completion is a checkpoint: keep verification resolved.
 - `code_search`: omit unused filters; no empty values (`path: ""`).
 - Advanced `code_search` takes `query`; filters `path`, `file_types`, `result_types`, `max_results`; results: definitions, exact syntactic usages. Queries use literal smart-case and `|`-separated literals; truncated: narrow. Example: `{"query":"TurnLoop","path":"src","result_types":["definition"]}`. Do not JSON-encode arrays or integers as strings. Use `exec_command` or a skill for syntax patterns.
 - On `preview_budget_exhausted`, trust the preserved outcome metadata; do not repeat the call. Run one verifier (`&&` chain, no pipes), then synthesize.

@@ -301,29 +301,20 @@ fn spool_path_exists(result: &Value, workspace_root: &Path) -> bool {
     let Some(spool_path) = result.get("spool_path").and_then(|v| v.as_str()) else {
         return true;
     };
-
-    let path = Path::new(spool_path);
-    if path.is_absolute() {
-        return path.exists();
-    }
-
-    workspace_root.join(path).exists()
-        || path.exists()
-        || env::current_dir().ok().is_some_and(|cwd| cwd.join(path).exists())
+    spool_path_is_replayable(spool_path, workspace_root)
 }
 
-/// Check whether a spool path is still replayable. Mirrors `spool_path_exists`
-/// but takes the path directly so it can be called from the unified TTL helper
-/// without re-extracting the spool path from the result object.
+/// Check whether a spool path is still replayable. Relative spool paths
+/// resolve against the workspace root only — the recorded session's cwd is
+/// not consulted, so replay is judged in the same coordinate space the spool
+/// was written in and no `getcwd` syscall runs on the per-call dedup path.
 fn spool_path_is_replayable(spool_path: &str, workspace_root: &Path) -> bool {
     let path = Path::new(spool_path);
     if path.is_absolute() {
         return path.exists();
     }
 
-    workspace_root.join(path).exists()
-        || path.exists()
-        || env::current_dir().ok().is_some_and(|cwd| cwd.join(path).exists())
+    workspace_root.join(path).exists() || path.exists()
 }
 
 /// Whether a TTL replay requires the record to reference a spool file.

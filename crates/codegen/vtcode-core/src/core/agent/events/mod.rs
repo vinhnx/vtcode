@@ -10,10 +10,10 @@ pub use lifecycle::{
 use crate::core::threads::{SubmissionId, ThreadRuntimeHandle};
 use crate::exec::events::{
     CommandExecutionItem, CommandExecutionStatus, CompactionMode, CompactionTrigger, EVENT_SCHEMA_VERSION, ErrorItem,
-    FileChangeItem, FileUpdateChange, HarnessEventItem, HarnessEventKind, ItemCompletedEvent, ItemStartedEvent,
-    PatchApplyStatus, PatchChangeKind, ThreadCompactBoundaryEvent, ThreadCompletedEvent, ThreadCompletionSubtype,
-    ThreadEvent, ThreadItem, ThreadItemDetails, ThreadStartedEvent, ToolOutcome, TurnBlockedEvent, TurnCompletedEvent,
-    TurnFailedEvent, TurnStartedEvent, Usage, tool_outcome_from_status,
+    HarnessEventItem, HarnessEventKind, ItemCompletedEvent, ItemStartedEvent, ThreadCompactBoundaryEvent,
+    ThreadCompletedEvent, ThreadCompletionSubtype, ThreadEvent, ThreadItem, ThreadItemDetails, ThreadStartedEvent,
+    ToolOutcome, TurnBlockedEvent, TurnCompletedEvent, TurnFailedEvent, TurnStartedEvent, Usage,
+    tool_outcome_from_status,
 };
 use anyhow::{Context, Result, anyhow};
 use parking_lot::Mutex;
@@ -813,21 +813,6 @@ impl ExecEventRecorder {
                 aggregated_output: aggregated_output.to_string(),
                 exit_code,
                 status,
-            })),
-        };
-        self.record(ThreadEvent::ItemCompleted(ItemCompletedEvent { item }));
-    }
-
-    pub fn file_change_completed(&mut self, path: &str) {
-        let change = FileUpdateChange {
-            path: path.to_string(),
-            kind: PatchChangeKind::Update,
-        };
-        let item = ThreadItem {
-            id: self.next_item_id(),
-            details: ThreadItemDetails::FileChange(Box::new(FileChangeItem {
-                changes: vec![change],
-                status: PatchApplyStatus::Completed,
             })),
         };
         self.record(ThreadEvent::ItemCompleted(ItemCompletedEvent { item }));

@@ -1,10 +1,16 @@
 //! Planning workflow and mutation detection helpers for ToolRegistry.
 
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
 use serde_json::Value;
 use vtcode_commons::canonicalize;
 
 use super::ToolRegistry;
 use crate::tools::tool_intent::{ToolIntent, classify_tool_intent};
+
+/// Canonical `/tmp/vtcode-plans` directory, resolved once per process.
+static CANONICAL_TMP_PLANS: OnceLock<PathBuf> = OnceLock::new();
 
 /// Tools that can write a plan file. Hoisted to a `const` so
 /// [`ToolRegistry::is_plan_file_operation`] does not allocate a fresh array on
@@ -141,9 +147,18 @@ impl ToolRegistry {
 
         let workspace = self.inventory.workspace_root();
         let plans_dir = workspace.join(".vtcode").join("plans");
-        let canonical_plans = match canonicalize(&plans_dir) {
-            Ok(dir) => dir,
-            Err(_) => plans_dir,
+        // Memoized per registry: this check runs on every file-writing tool
+        // call while planning is active, and the plans directory does not
+        // move within a session.
+        let canonical_plans = match self.canonical_plans_dir.get() {
+            Some(dir) => dir.clone(),
+            None => match canonicalize(&plans_dir) {
+                Ok(dir) => {
+                    let _ = self.canonical_plans_dir.set(dir.clone());
+                    dir
+                }
+                Err(_) => plans_dir,
+            },
         };
 
         if absolute.starts_with(&canonical_plans) {
@@ -151,12 +166,10 @@ impl ToolRegistry {
         }
 
         let tmp_plans = std::env::temp_dir().join("vtcode-plans");
-        let canonical_tmp = match canonicalize(&tmp_plans) {
-            Ok(dir) => dir,
-            Err(_) => tmp_plans,
-        };
+        let canonical_tmp =
+            CANONICAL_TMP_PLANS.get_or_init(|| canonicalize(&tmp_plans).unwrap_or_else(|_| tmp_plans.clone()));
 
-        absolute.starts_with(&canonical_tmp)
+        absolute.starts_with(canonical_tmp)
     }
 
     /// Check if a unified tool call represents a read-only action.

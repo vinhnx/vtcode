@@ -21,6 +21,14 @@ pub const DEFAULT_MESSAGE_LIMIT: usize = 4_000;
 /// Maximum message count limit.
 pub const MAX_MESSAGE_LIMIT: usize = 20_000;
 
+/// Aggregate provider-visible tool preview budget across one turn (32 KiB).
+///
+/// Once a turn's tool previews exhaust this budget, later tool responses keep
+/// bounded outcome/control metadata while payload bodies are truncated or
+/// omitted. See the agent-loop contract ("Across a turn, provider-visible
+/// tool previews are capped at 32 KiB").
+pub const TURN_PREVIEW_BUDGET_BYTES: usize = 32 * 1024;
+
 /// Truncation marker appended when content is cut off.
 const TRUNCATION_MARKER: &str = "\n[... content truncated due to size limit ...]";
 

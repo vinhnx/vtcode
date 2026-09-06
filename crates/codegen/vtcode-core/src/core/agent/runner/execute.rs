@@ -450,6 +450,7 @@ impl AgentRunner {
 
         let result: Result<_> = {
             for turn in 0..self.max_turns {
+                self.tool_registry.begin_turn_preview_window();
                 if matches!(runtime.poll_turn_control().await, RuntimeControl::StopRequested) {
                     self.runner_println(format_args!(
                         "{} {}",
@@ -1289,6 +1290,7 @@ impl AgentRunner {
                 ) {
                     Ok(artifacts) => emit_blocked_handoff_events(
                         &mut event_recorder,
+                        &runtime.state.outcome.description(),
                         &artifacts.current_path,
                         &artifacts.archive_path,
                     ),

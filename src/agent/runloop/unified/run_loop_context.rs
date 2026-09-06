@@ -96,7 +96,8 @@ pub(crate) const TOOL_BUDGET_WARNING_THRESHOLD: f64 = 0.75;
 /// history for one turn. Complete output remains in the internal spool and
 /// current-session tool-output viewer; this only bounds the diagnostic surface
 /// seen by a model during a recovery-heavy turn.
-pub(crate) const MODEL_VISIBLE_TOOL_PREVIEW_BUDGET_BYTES: usize = 32 * 1024;
+pub(crate) const MODEL_VISIBLE_TOOL_PREVIEW_BUDGET_BYTES: usize =
+    vtcode_config::constants::output_limits::TURN_PREVIEW_BUDGET_BYTES;
 /// Model-facing guidance emitted after a user increases the per-turn tool
 /// budget. Keep this shared by the normal and out-of-band provider paths so a
 /// grant has the same continuation semantics regardless of transport.

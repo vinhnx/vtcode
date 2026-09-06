@@ -214,7 +214,7 @@ impl ToolHandler for ApplyPatchHandler {
 
         // Create emitter for event tracking
         let emitter = ToolEmitter::apply_patch(changes.clone(), true);
-        let event_ctx = ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, tracker.as_ref());
+        let event_ctx = ToolEventCtx::new(turn.as_ref(), &call_id, tracker.as_ref());
         emitter.begin(event_ctx).await;
 
         // Create request
@@ -240,7 +240,7 @@ impl ToolHandler for ApplyPatchHandler {
             .await;
 
         // Emit completion event and format output
-        let event_ctx = ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, tracker.as_ref());
+        let event_ctx = ToolEventCtx::new(turn.as_ref(), &call_id, tracker.as_ref());
         let content = emitter.finish(event_ctx, result).await?;
 
         Ok(ToolOutput::Function { content, content_items: None, success: Some(true) })

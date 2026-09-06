@@ -360,6 +360,29 @@ pub(super) fn sanitize_subagent_tool_output_paths(workspace_root: &Path, value: 
     }
 }
 
+/// Re-check submitted session input against the PTY deny policy.
+///
+/// `enforce_pty_command_policy` only guards session *creation*; without this
+/// re-check the deny list is defeated by typing the denied program into an
+/// already-running session (e.g. starting `echo`, then sending `bash\n`).
+pub(super) fn enforce_exec_input_line_policy(input: &str) -> Result<()> {
+    for line in input.lines() {
+        let trimmed = line.trim().to_ascii_lowercase();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let is_standalone = trimmed.split_whitespace().count() == 1;
+        let deny_match = PTY_DENY_PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix));
+        let standalone_denied = is_standalone && PTY_DENY_STANDALONE.contains(&trimmed.as_str());
+        if deny_match || standalone_denied {
+            return Err(anyhow!(
+                "Session input '{line}' would launch a program blocked by the PTY safety policy. Start a fresh session through exec_command with operator approval instead."
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn enforce_pty_command_policy(display_command: &str, confirm: bool) -> Result<()> {
     let lower = display_command.to_ascii_lowercase();
     let trimmed = lower.trim();
@@ -378,4 +401,26 @@ pub(super) fn enforce_pty_command_policy(display_command: &str, confirm: bool) -
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod input_policy_tests {
+    use super::enforce_exec_input_line_policy;
+
+    #[test]
+    fn blocks_interactive_launchers_submitted_into_sessions() {
+        assert!(enforce_exec_input_line_policy("bash\n").is_err());
+        assert!(enforce_exec_input_line_policy("  zsh  \n").is_err());
+        assert!(enforce_exec_input_line_policy("echo ok\nbash\n").is_err());
+        assert!(enforce_exec_input_line_policy("vim\n").is_err());
+    }
+
+    #[test]
+    fn allows_plain_session_input() {
+        assert!(enforce_exec_input_line_policy("echo ok\n").is_ok());
+        assert!(enforce_exec_input_line_policy("\n\n").is_ok());
+        assert!(enforce_exec_input_line_policy("printf '%s\\n' hello\n").is_ok());
+        // Prefix matches must land on the program token, not substrings.
+        assert!(enforce_exec_input_line_policy("bashism\n").is_ok());
+    }
 }

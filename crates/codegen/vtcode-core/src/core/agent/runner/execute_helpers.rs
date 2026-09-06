@@ -23,11 +23,36 @@ pub(super) fn record_terminal_turn_event(event_recorder: &mut ExecEventRecorder,
 }
 
 /// Emit blocked handoff events for both current and archive paths.
+///
+/// Also publishes the first-class `turn.blocked` contract event so UI and
+/// external subscribers see the same signal the unified runloop emits; the
+/// legacy runner does not track the blocked-tool fuse counters, so they keep
+/// their defaults.
 pub(super) fn emit_blocked_handoff_events(
     event_recorder: &mut ExecEventRecorder,
+    blocked_message: &str,
     current_path: &std::path::Path,
     archive_path: &std::path::Path,
 ) {
+    event_recorder.turn_blocked(vtcode_exec_events::TurnBlockedEvent {
+        message: blocked_message.to_string(),
+        last_tool: None,
+        blocked_streak: 0,
+        blocked_total: 0,
+        consecutive_cap: 0,
+        total_cap: 0,
+        recovery_active: false,
+        usage: None,
+    });
+    event_recorder.harness_event(
+        crate::exec::events::HarnessEventKind::TurnBlocked,
+        Some(blocked_message.to_string()),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     for path in [current_path, archive_path] {
         event_recorder.harness_event(
             crate::exec::events::HarnessEventKind::BlockedHandoffWritten,

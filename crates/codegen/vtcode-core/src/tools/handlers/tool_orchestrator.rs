@@ -192,9 +192,7 @@ mod tests {
     use crate::tools::handlers::sandboxing::{
         Approvable, BoxFuture, NetworkAccess, SandboxConfig, SandboxPolicy, Sandboxable, SandboxablePreference,
     };
-    use crate::tools::handlers::tool_handler::{
-        ApprovalPolicy, Constrained, ShellEnvironmentPolicy, ToolEvent, ToolSession,
-    };
+    use crate::tools::handlers::tool_handler::{ApprovalPolicy, Constrained, ShellEnvironmentPolicy, ToolSession};
 
     struct TestSession {
         cwd: PathBuf,
@@ -221,8 +219,6 @@ mod tests {
         fn user_shell(&self) -> &str {
             "/bin/zsh"
         }
-
-        async fn send_event(&self, _event: ToolEvent) {}
     }
 
     struct TestRuntime {

@@ -17,4 +17,19 @@ impl ToolRegistry {
     pub fn pty_poll_count(&self) -> u64 {
         self.pty_poll_counter.load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    /// Reset the aggregate provider-visible preview ledger at a turn boundary.
+    ///
+    /// Call once per turn from each runloop so the 32 KiB budget in
+    /// `TURN_PREVIEW_BUDGET_BYTES` applies per turn rather than per session.
+    pub fn begin_turn_preview_window(&self) {
+        self.turn_preview_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Charge `bytes` against the per-turn preview budget, returning the
+    /// total before the charge. Consulted by `process_tool_output` to
+    /// truncate or strip payload bodies once the budget is exhausted.
+    pub(super) fn charge_turn_preview_bytes(&self, bytes: usize) -> usize {
+        self.turn_preview_bytes.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed)
+    }
 }

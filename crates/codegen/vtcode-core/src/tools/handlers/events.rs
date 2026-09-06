@@ -1,10 +1,11 @@
 //! Tool event emitter (from Codex)
 //!
-//! Handles emitting events during tool execution lifecycle:
-//! - Begin events when tool starts
-//! - Success events with output
-//! - Failure events with errors
-//! - Patch-specific events for apply_patch
+//! Handles the tool execution lifecycle:
+//! - Diff-tracker updates for apply_patch begin/end
+//! - Structured tracing for begin/success/failure stages
+//!
+//! Lifecycle visibility into the canonical event stream flows through the
+//! runloop's `ThreadEvent` recorder (`item.*`), not through this module.
 
 use crate::config::constants::tools;
 use crate::types::CompactStr;
@@ -14,14 +15,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::sandboxing::{ExecToolCallOutput, ToolError};
-use super::tool_handler::{
-    DiffTracker, FileChange, PatchApplyBeginEvent, PatchApplyEndEvent, ToolCallError, ToolEvent, ToolEventBegin,
-    ToolEventFailure, ToolEventSuccess, ToolSession, TurnContext,
-};
+use super::tool_handler::{DiffTracker, FileChange, ToolCallError, TurnContext};
 
 /// Context for emitting tool events
 pub struct ToolEventCtx<'a> {
-    pub session: &'a dyn ToolSession,
     pub turn: &'a TurnContext,
     pub call_id: &'a str,
     pub turn_diff_tracker: Option<&'a Arc<tokio::sync::Mutex<DiffTracker>>>,
@@ -29,12 +26,11 @@ pub struct ToolEventCtx<'a> {
 
 impl<'a> ToolEventCtx<'a> {
     pub fn new(
-        session: &'a dyn ToolSession,
         turn: &'a TurnContext,
         call_id: &'a str,
         tracker: Option<&'a Arc<tokio::sync::Mutex<DiffTracker>>>,
     ) -> Self {
-        Self { session, turn, call_id, turn_diff_tracker: tracker }
+        Self { turn, call_id, turn_diff_tracker: tracker }
     }
 }
 
@@ -153,13 +149,13 @@ impl ToolEmitter {
                     guard.on_patch_begin(changes);
                 }
 
-                let event = ToolEvent::PatchApplyBegin(PatchApplyBeginEvent {
-                    call_id: ctx.call_id.to_string(),
-                    turn_id: ctx.turn.turn_id.clone(),
-                    changes: changes.clone(),
-                    auto_approved: *auto_approved,
-                });
-                ctx.session.send_event(event).await;
+                tracing::debug!(
+                    call_id = %ctx.call_id,
+                    turn_id = %ctx.turn.turn_id,
+                    changes = changes.len(),
+                    auto_approved = *auto_approved,
+                    "patch apply began"
+                );
             }
 
             // Apply patch success
@@ -180,21 +176,17 @@ impl ToolEmitter {
 
             // Shell/CommandSession begin
             (Self::Shell { .. } | Self::CommandSession { .. }, ToolEventStage::Begin) => {
-                let event = ToolEvent::Begin(ToolEventBegin {
-                    call_id: ctx.call_id.to_string(),
-                    tool_name: self.tool_name().into(),
-                    turn_id: ctx.turn.turn_id.clone(),
-                });
-                ctx.session.send_event(event).await;
+                tracing::debug!(
+                    tool = %self.tool_name(),
+                    call_id = %ctx.call_id,
+                    turn_id = %ctx.turn.turn_id,
+                    "Tool execution started"
+                );
             }
 
             // Shell/CommandSession success
-            (Self::Shell { .. } | Self::CommandSession { .. }, ToolEventStage::Success(output)) => {
-                let event = ToolEvent::Success(ToolEventSuccess {
-                    call_id: ctx.call_id.to_string(),
-                    output: output.combined_output(),
-                });
-                ctx.session.send_event(event).await;
+            (Self::Shell { .. } | Self::CommandSession { .. }, ToolEventStage::Success(_)) => {
+                tracing::debug!(call_id = %ctx.call_id, "Tool execution succeeded");
             }
 
             // Shell/CommandSession failure
@@ -204,26 +196,21 @@ impl ToolEmitter {
                     ToolEventFailureKind::Message(msg) => msg.clone(),
                     ToolEventFailureKind::Error(err) => err.clone(),
                 };
-                let event = ToolEvent::Failure(ToolEventFailure { call_id: ctx.call_id.to_string(), error });
-                ctx.session.send_event(event).await;
+                tracing::warn!(call_id = %ctx.call_id, error = %error, "Tool execution failed");
             }
 
             // Generic tool events
             (Self::Generic { tool_name }, ToolEventStage::Begin) => {
-                let event = ToolEvent::Begin(ToolEventBegin {
-                    call_id: ctx.call_id.to_string(),
-                    tool_name: tool_name.to_string(),
-                    turn_id: ctx.turn.turn_id.clone(),
-                });
-                ctx.session.send_event(event).await;
+                tracing::debug!(
+                    tool = %tool_name,
+                    call_id = %ctx.call_id,
+                    turn_id = %ctx.turn.turn_id,
+                    "Tool execution started"
+                );
             }
 
-            (Self::Generic { .. }, ToolEventStage::Success(output)) => {
-                let event = ToolEvent::Success(ToolEventSuccess {
-                    call_id: ctx.call_id.to_string(),
-                    output: output.combined_output(),
-                });
-                ctx.session.send_event(event).await;
+            (Self::Generic { .. }, ToolEventStage::Success(_)) => {
+                tracing::debug!(call_id = %ctx.call_id, "Tool execution succeeded");
             }
 
             (Self::Generic { .. }, ToolEventStage::Failure(kind)) => {
@@ -232,8 +219,7 @@ impl ToolEmitter {
                     ToolEventFailureKind::Message(msg) => msg.clone(),
                     ToolEventFailureKind::Error(err) => err.clone(),
                 };
-                let event = ToolEvent::Failure(ToolEventFailure { call_id: ctx.call_id.to_string(), error });
-                ctx.session.send_event(event).await;
+                tracing::warn!(call_id = %ctx.call_id, error = %error, "Tool execution failed");
             }
 
             _ => {}
@@ -316,22 +302,14 @@ impl ToolEmitter {
     }
 
     /// Emit patch end event
-    async fn emit_patch_end(&self, ctx: ToolEventCtx<'_>, stdout: String, stderr: String, success: bool) {
+    async fn emit_patch_end(&self, ctx: ToolEventCtx<'_>, _stdout: String, _stderr: String, success: bool) {
         // Update diff tracker
-        {
-            if let Some(tracker) = ctx.turn_diff_tracker {
-                let mut guard = tracker.lock().await;
-                guard.on_patch_end(success);
-            }
-
-            let event = ToolEvent::PatchApplyEnd(PatchApplyEndEvent {
-                call_id: ctx.call_id.to_string(),
-                success,
-                stdout,
-                stderr,
-            });
-            ctx.session.send_event(event).await;
+        if let Some(tracker) = ctx.turn_diff_tracker {
+            let mut guard = tracker.lock().await;
+            guard.on_patch_end(success);
         }
+
+        tracing::debug!(call_id = %ctx.call_id, success, "patch apply finished");
     }
 }
 

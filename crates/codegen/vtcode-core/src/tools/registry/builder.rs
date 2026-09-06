@@ -187,6 +187,8 @@ impl ToolRegistry {
             initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_call_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pty_poll_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_preview_bytes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            canonical_plans_dir: Arc::new(std::sync::OnceLock::new()),
             metrics,
             shell_policy: Arc::new(RwLock::new(ShellPolicyChecker::new())),
             runtime_sandbox_config: Arc::new(RwLock::new(super::sandbox_facade::runtime_sandbox_config_default())),
