@@ -20,48 +20,6 @@ The most intricate parts are likely:
 
 ==> improve
 
-===
-
-diagnose and improve vtcode harness based on the session run log.
-
-/Users/vinhnguyenxuan/Developer/learn-by-doing/vtcode/.vtcode/checkpoints/turn_1032.json /Users/vinhnguyenxuan/Developer/learn-by-doing/vtcode/.vtcode/checkpoints/turn_1031.json
-
-Diagnosis (from checkpoint evidence)
-Turns analyzed: turn_1030.json (108,346 in-tok, 12 tools, 56s), turn_1031.json (32,280 in-tok, 4 tools, 33.7s), turn_1032.json (16,149 in-tok, 0 tools, 14.3s).
-#: 1
-Finding: Prompt cache never warm
-Evidence: cached_input_tokens: 0, cache_creation_tokens: 0 on all turns — turn
-1030 paid full price for 108K input tokens
-─────────────────────────────────────────────────────────────────────────────────
-#: 2
-Finding: Preview budget exhaustion returns zero visibility
-Evidence: Even trivial/empty commands returned preview_budget_exhausted with
-empty output; spool_path: null, byte_count: 7751 = result dropped entirely (
-neither inline nor spooled)
-─────────────────────────────────────────────────────────────────────────────────
-#: 3
-Finding: completion_state: "unknown" on successful (exit-0) exec results
-Evidence: Diagnostics can't distinguish clean completion from timeout
-─────────────────────────────────────────────────────────────────────────────────
-#: 4
-Finding: model_visible_output_bytes ≪ raw_spooled_bytes
-Evidence: Turn 1031: 19,325 visible vs 44,129 spooled (~44% of evidence reached
-the model)
-─────────────────────────────────────────────────────────────────────────────────
-#: 5
-Finding: Low-signal detector misses duplicate listings
-Evidence: low_signal_tool_calls: 0 despite 3 overlapping find invocations in one
-turn
-─────────────────────────────────────────────────────────────────────────────────
-#: 6
-Finding: Diagnostics schema instability
-Evidence: Turn 1030 has elapsed_ms: null, requested_tool_calls: null — no trend
-analysis possible across turns
-─────────────────────────────────────────────────────────────────────────────────
-#: 7
-Finding: files array always empty (file_count: 0) even for file-reading turns
-Evidence: Session replay can't show touched files
-
 =====
 
 More prompts (8-17) 8. Cache-stability + token-bloat fix:
@@ -119,23 +77,42 @@ reasoning.effort=xhigh. Audit prompt caching: stable_system_prefix_hash in core/
 
 ===
 
-Engine: gpt-6-astra for execution quality. Target: whole vtcode harness, model-agnostic.
-Rules: No if model=="gpt-6-astra" branches. Use ResolvedModel capability (context_window/pricing/supports_reasoning_effort), Provider trait, ModelCatalogEntry. Test on >=3 families (OpenAI + Claude + Gemini/local). Preserve ThreadEvent contract, 4-space, anyhow::Result+context, CompactString, ./scripts/check-dev.sh --changed + cargo nextest run (never cargo test).
-User instructions > AGENTS.md > SKILL.md. Bias to reviewable action, delegate parallel subagents, one verifier unless failed.
-P1 — Capability-driven budgets, not 1M assumption:
-Replace hardcoded 160k cap + 90% compaction rule with effective_budget=min(ResolvedModel::context_window(), context.max_context_tokens, session safety). Fix in compaction/memory_envelope.rs + vtcode-config/src/context.rs + core/agent/runner/task_setup.rs. Log denominator per turn. Test with small (32k dynamic in model_resolver.rs:606) vs 1M models. Verify auto-compact triggers correctly for both.
-P2 — Reasoning-effort mapping without fidelity loss:
-Audit rig_adapter.rs:81-139 where XHigh/Max->high on some providers + provider_trait.rs:24 capability flag. Introduce central ReasoningEffortMapper: query supports_reasoning_effort, degrade explicitly (Max->XHigh->High) with TurnBlocked/harness diagnostic, never silent. Remove duplicate estimate_cost in model_resolver.rs:286 vs usage_cost.rs. Test matrix all ReasoningEffortLevel x OpenAI/Anthropic/Gemini.
-P3 — Prompt cache stable across models:
-In core/agent/hash_utils.rs + prompts/system.rs:576-606: prefix hash must include capability digest (model id, reasoning tag, tool catalog epoch) not model name string. Keep ShellProfile/Environment/Harness-Limits frozen per segment. Assert PROMPT_CACHE hit via Usage.cache_hit_rate. Must improve hits for all providers, not just Astra Responses caching.
-P4 — Tool guidelines per capability level:
-Extend prompts/guidelines.rs:22 generate_tool_guidelines(CapabilityLevel) to emit terse vs verbose variants based on ResolvedModel context + cost, not Astra verbosity. Small-context models get Minimal profile, large get Default. Parallel-call hint only if provider supports parallel tool calls. Snapshot test both.
-P5 — Cost + fallback unified:
-Unify model_resolver estimate + usage_cost raw=enforcement/effective=display. If pricing None + max_budget_usd set -> fail-closed or explicit allow-unpriced, not silent skip in runner/execute.rs. Fix manual is_pro_variant + hardcoded fallback in capabilities.rs:154 to catalog-driven. Aggregate cost_usd in vtcode-eval report. Test gpt-6-astra via 3 routes + missing-pricing case.
-P6 — Safety/sandbox + spool harness-wide:
-Defensive only. Fix sh -c join, redirection-blind preflight, env denylist->allowlist, lexical vs resolved TOCTOU, spool substring check, WebMCP CARGO_HOME trust, skill network miss, MCP schema verbatim — at SafetyGateway/registry layer so all models inherit. No model-specific bypass. Add adversarial nextest + pty_tests/pipe_tests.
-P7 — TUI complexity (session/transcript/input/async/theme):
-In vtcode-ui/src/tui/core_tui/session.rs + transcript.rs:28-62 + input_manager.rs + runner/events.rs + theme/tests.rs:58-80: fix transition table, reflow revision invalidation, input owner enum, Tick/PTY/redraw coalescing, WCAG 4.5:1 for all themes. Must work headless + all terminals, not Astra computer-use only. Verify cargo nextest run -p vtcode-ui -E 'test(theme)' + transcript_rendering + overlay_list tests.
-P8 — Eval/memory generalizer:
-Fix vtcode-eval/metric.rs true pass@k/pass^k, attempts>=1 guard, parallel run_suite with cost/latency join to trace_analyzer. Fix vtcode-memory eviction->summarize hook + BM25 search + LRU invalidate. Add cross-model regression suite (Astra executes, Claude/Gemini must also pass).
-Run order: P3 -> P1/P2/P5 -> P4 -> P6 -> P7 -> P8. Each PR must show check-dev.sh --changed + 3-model evidence.
+Refined plan (locked decisions applied) 0. Goal + guardrails
+Engine gpt-6-astra, whole harness model-agnostic. No if model=="..."; only ResolvedModel::context_window()/pricing()/reasoning_supported(), Provider trait, ModelCatalogEntry.
+
+- ThreadEvent 0.14.0 frozen — no new variants; unify via manifest referencing thread.compact_boundary, context.reset, turn.blocked.
+- Style: 4-space, anyhow::Result+with_context, CompactString, surgical diffs, no new top-level harness subsystem.
+- Verify each PR: ./scripts/check-dev.sh --changed + cargo nextest run (never cargo test) + 3-family log (OpenAI + Claude + Gemini/local).
+- Execution: parallel subagents per workstream, one verifier unless failed.
+  Locked: 7 findings → 7 small issues; scope = docs + High fixes; P1 160k default; P5 fail-closed + allow_unpriced=false; P8 run_suite stays sequential.
+
+1. File 7 small issues (no code)
+   Restore deleted diagnosis as tracked issues: cold cache, preview_budget_exhausted+spool_path:null, completion_state:unknown on exit-0, 19k/44k visible/spooled gap, low_signal_tool_calls:0 on 3×find, elapsed_ms:null, files:[].
+2. P3 cache + P1 budget denominator (first, parallelizable)
+
+- core/agent/hash_utils.rs:19-62,229-251: keep PromptCapabilityIdentity; replace raw model string with capability digest (model_id canonical + ResolvedModel::context_window + reasoning_tag + catalog_epoch + parallel/cache/tools bools) via FNV-1a hash_value; strip [Harness Limits]/Environment/ShellProfile from stable prefix or freeze per segment (request_envelope.rs:12-21,45-108, state.rs:206-282, request_builder.rs:230-253).
+- Fix prompts/system.rs:576-609 cache_key: DefaultHasher → StableHasher, require explicit epoch, include digest.
+- P1: default context.max_context_tokens=160k (align context.rs:196-198 0 with constants/tool_limits + docs agent-loop-contract.md:204); effective_budget=min(provider, session, safety) in memory_envelope.rs:1276-1362, task_setup.rs:131-135, execute.rs:509-557; log denominator/turn; 90% of min() threshold.
+- Tests: same-prompt × 3 families → same stable prefix, distinct digest; Usage::cache_hit_rate (commons/llm.rs:72-84) hit on 2nd turn; 32k vs 1M auto-compact (turn/compaction/tests.rs:2078-2145).
+
+3. P2 effort + P5 cost (parallel subagents)
+
+- P2: reuse reasoning_effort.rs:20-99 ReasoningEffortMapper; refactor rig_adapter.rs:25-144 to query provider_trait.rs:24 supports_reasoning_effort + supported_reasoning_efforts:187-195; degrade Max→XHigh→High with turn.blocked diagnostic, honor allow_reasoning_effort_downgrade=false (agent.rs:99-101). Matrix test all levels × OpenAI/Anthropic/Gemini.
+- P5: keep usage_cost.rs:55-102 canonical (raw=enforcement, effective=display); execute.rs:789-840: pricing None + max_budget set + !allow_unpriced → TurnBlocked, else explicit warn; replace defaults.rs:7-17, openai/errors.rs:72-78, lightweight_routing.rs:179-201, orchestrator_retry.rs:150-179 hardcodes with catalog-driven (preferred_lightweight_variant, non_reasoning_variant); aggregate cost_usd in eval/task.rs:49, metric.rs, report.rs.
+
+4. P4 guidelines (small)
+   prompts/guidelines.rs:22-94: add overload generate_tool_guidelines(level, ResolvedModel); terse Minimal for small/high-cost, Default for large; parallel hint only if supports_parallel_tool_config. Snapshot both. Files: guidelines.rs, system.rs:319-385, harness_limits.rs:14-50.
+5. P6 safety gateway (High fixes)
+   All at tools/safety_gateway.rs:197-690 + registry/:
+
+- Spool: output_spooler.rs:34-41,191, spool_processing.rs:43-63, file_ops/read.rs:253-256, tool_reads.rs:28-31 substring → canonical containment, no_spool enforced at gateway, readers via SpooledOutputReference only.
+- Env: safety/sandboxing/manager.rs:56-62, exec_session.rs:502-506, child_spawn.rs:15-212 denylist → build_sanitized_env allowlist in restrictive.
+- Paths: commons/paths.rs:202-287 resolved variant into bash-runner/policy.rs:36-42, skill_policy.rs:257-278, command_validation.rs:1015.
+- Shell: bash-runner/executor.rs:164-169, runner.rs:435-437, shell_handler.rs:86-87 join(" ") → argv-only; wire shell_parser.rs:157-264 redirection + sudo/$BIN/curl/python -c into sandbox_runtime.rs:674-843 preflight.
+- WebMCP filesystem.rs:550-561,1033-1118 pin system cargo; skills skill_policy.rs:15-63 expand NETWORK_TOOLS; MCP mcp_tool.rs:12-18, mcp/provider.rs:561-575 size cap + namespace + list_changed limit.
+- Tests: adversarial nextest + extend pty_tests.rs, pipe_tests.rs:1-276.
+
+6. P7 TUI targeted + P8 eval/memory (last)
+
+- P7: keep facade (session.rs:30-80 + 20 submodules); fix transition table (activity.rs:4-60), reflow invalidation (transcript.rs:28-311, state.rs:139-147,477-512), introduce InputOwner enum (replace input_enabled bools), keep Tick/PTY coalescing (events.rs:12-211, drive.rs:199-512), WCAG 4.5:1 (theme/tests.rs:58-125). Verify nextest -p vtcode-ui -E 'test(theme)' + transcript_rendering + overlay_list.
+- P8: true pass@k=1-C(n-c,k)/C(n,k), pass^k=(c/n)^k + attempts>=1 guard in suite.rs; keep executor.rs:33-44 sequential, parallelize at caller with cost/latency join to trace_analyzer/; eviction→summarize hook, BM25 replace substring (query.rs:141-227), LRU invalidate (query.rs:11-14); cross-model regression suite (Astra executes, Claude/Gemini pass).
