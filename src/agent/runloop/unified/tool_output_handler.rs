@@ -1123,12 +1123,13 @@ fn render_error_common(renderer: &mut AnsiRenderer, name: &str, error: &str, err
 #[derive(Default)]
 struct OutcomeState {
     turn_modified_files: Vec<PathBuf>,
+    turn_touched_files: Vec<PathBuf>,
     last_tool_stdout: Option<String>,
 }
 
 impl OutcomeState {
-    fn into_tuple(self) -> (Vec<PathBuf>, Option<String>) {
-        (self.turn_modified_files, self.last_tool_stdout)
+    fn into_full_tuple(self) -> (Vec<PathBuf>, Vec<PathBuf>, Option<String>) {
+        (self.turn_modified_files, self.turn_touched_files, self.last_tool_stdout)
     }
 }
 
@@ -1195,6 +1196,20 @@ async fn handle_success_common(
 
     if !payload.modified_files.is_empty() {
         state.turn_modified_files.extend(collect_modified_files(payload.modified_files));
+    }
+
+    // Track read/touched paths for checkpoint replay even when nothing was
+    // modified. Reuses the existing activity-path extractor so read_file,
+    // grep, and search turns leave visible evidence without snapshotting
+    // file contents.
+    if let Some(workspace_root) = ctx.workspace_root {
+        let touched =
+            collect_instruction_activity_paths(workspace_root, args_val, payload.output, payload.modified_files);
+        if !touched.is_empty() {
+            ctx.session_stats
+                .record_touched_files(touched.iter().map(|path| path.display().to_string()));
+            state.turn_touched_files.extend(touched);
+        }
     }
 
     Ok(())
@@ -1347,6 +1362,17 @@ pub(crate) async fn handle_pipeline_output(
     outcome: &ToolPipelineOutcome,
     vt_config: Option<&VTCodeConfig>,
 ) -> Result<(Vec<PathBuf>, Option<String>)> {
+    let (modified, _touched, stdout) = handle_pipeline_output_full(ctx, name, args_val, outcome, vt_config).await?;
+    Ok((modified, stdout))
+}
+
+pub(crate) async fn handle_pipeline_output_full(
+    ctx: &mut RunLoopContext<'_>,
+    name: &str,
+    args_val: &serde_json::Value,
+    outcome: &ToolPipelineOutcome,
+    vt_config: Option<&VTCodeConfig>,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>, Option<String>)> {
     // The registry owns the workspace used by the executor and the spooler.
     // Use it here even on the Copilot path, whose lightweight run-loop
     // context intentionally does not carry an auto-permission context.
@@ -1361,7 +1387,7 @@ pub(crate) async fn handle_pipeline_output(
         workspace_root,
     };
     let state = process_outcome_common(&mut output_ctx, name, args_val, outcome).await?;
-    Ok(state.into_tuple())
+    Ok(state.into_full_tuple())
 }
 
 // Adapter for TurnLoopContext (to avoid duplication when handling tool output in the turn loop)
@@ -1373,8 +1399,12 @@ pub(crate) async fn handle_pipeline_output_from_turn_ctx(
     vt_config: Option<&VTCodeConfig>,
 ) -> Result<(Vec<PathBuf>, Option<String>)> {
     let mut run_ctx = ctx.as_run_loop_context();
-    let (modified_files, last_stdout) =
-        handle_pipeline_output(&mut run_ctx, name, args_val, outcome, vt_config).await?;
+    // `handle_pipeline_output_full` already records touched files into
+    // `session_stats` via `handle_success_common` (same underlying stats
+    // object); do not record a second time here. Modified files remain the
+    // snapshot content source while touched files only feed checkpoint replay.
+    let (modified_files, _touched_files, last_stdout) =
+        handle_pipeline_output_full(&mut run_ctx, name, args_val, outcome, vt_config).await?;
 
     if let ToolExecutionStatus::Success { output, modified_files, command_success: true, .. } = &outcome.status {
         let activity_paths =
@@ -1504,11 +1534,11 @@ mod tests {
             mcp_panel_state: &mut mcp,
             vt_config: None::<&VTCodeConfig>,
         };
-        let (mod_files, _last_stdout) =
+        let (mod_files, _touched, _last_stdout) =
             process_outcome_common(&mut output_ctx, "write_file", &serde_json::json!({}), &outcome)
                 .await
                 .expect("render should succeed")
-                .into_tuple();
+                .into_full_tuple();
 
         // Confirm the function recorded the tool call
         let recorded = stats.sorted_tools();
@@ -1997,11 +2027,11 @@ mod tests {
             mcp_panel_state: &mut mcp,
             vt_config: None::<&VTCodeConfig>,
         };
-        let (_mod_files, _last_stdout) =
+        let (_mod_files, _touched, _last_stdout) =
             process_outcome_common(&mut output_ctx, "mcp_example", &serde_json::json!({}), &outcome)
                 .await
                 .expect("render should succeed")
-                .into_tuple();
+                .into_full_tuple();
 
         // Ensure mcp panel recorded an event
         assert!(mcp.event_count() > 0);

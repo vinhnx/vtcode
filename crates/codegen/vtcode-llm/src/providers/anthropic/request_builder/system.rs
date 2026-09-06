@@ -8,13 +8,21 @@ pub(crate) struct SystemPromptBuildResult {
     pub has_uncached_runtime_context: bool,
 }
 
+// Keep in sync with `stable_system_prefix_hash` in vtcode-core
+// (`core/agent/hash_utils.rs`): both must treat `[History Directives]` as
+// dynamic per-turn content or cache identity diverges from the wire split.
 const RUNTIME_CONTEXT_SECTION_HEADER: &str = "[Runtime Context]";
 const HISTORY_DIRECTIVES_SECTION_HEADER: &str = "[History Directives]";
 const RUNTIME_CONTEXT_NEWLINE: &str = concat!("[Runtime Context]", "\n");
 const NEWLINE_RUNTIME_CONTEXT_NEWLINE: &str = concat!("\n", "[Runtime Context]", "\n");
+const NEWLINE_HISTORY_DIRECTIVES_NEWLINE: &str = concat!("\n", "[History Directives]", "\n");
+const HISTORY_DIRECTIVES_NEWLINE: &str = concat!("[History Directives]", "\n");
 
 fn has_runtime_context_section(prompt: &str) -> bool {
-    prompt.starts_with(RUNTIME_CONTEXT_NEWLINE) || prompt.contains(NEWLINE_RUNTIME_CONTEXT_NEWLINE)
+    prompt.starts_with(RUNTIME_CONTEXT_NEWLINE)
+        || prompt.contains(NEWLINE_RUNTIME_CONTEXT_NEWLINE)
+        || prompt.starts_with(HISTORY_DIRECTIVES_NEWLINE)
+        || prompt.contains(NEWLINE_HISTORY_DIRECTIVES_NEWLINE)
 }
 
 fn append_history_system_directives(
@@ -59,6 +67,13 @@ fn split_runtime_context_section(prompt: &str) -> Option<(String, String)> {
         let (stable_prefix, runtime_section) = prompt.split_at(split_at);
         (stable_prefix, runtime_section.trim_start_matches('\n'))
     } else if prompt.starts_with(RUNTIME_CONTEXT_NEWLINE) {
+        ("", prompt)
+    } else if let Some(split_at) = prompt.rfind(NEWLINE_HISTORY_DIRECTIVES_NEWLINE) {
+        // History directives without an explicit runtime header are still
+        // dynamic per-turn content and must not pollute the cached prefix.
+        let (stable_prefix, runtime_section) = prompt.split_at(split_at);
+        (stable_prefix, runtime_section.trim_start_matches('\n'))
+    } else if prompt.starts_with(HISTORY_DIRECTIVES_NEWLINE) {
         ("", prompt)
     } else {
         return None;

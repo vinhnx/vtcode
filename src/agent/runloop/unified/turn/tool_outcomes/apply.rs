@@ -83,6 +83,11 @@ pub(crate) async fn apply_turn_outcome(outcome: TurnLoopOutcome, ctx: TurnOutcom
                     runtime_turn_id: ctx.runtime_turn_id.map(CompactStr::from),
                     session_turn_number: Some(turn_number),
                     turn_diagnostics: Some(turn_diagnostics),
+                    touched_files: outcome
+                        .turn_touched_files
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect(),
                 };
                 match manager
                     .create_snapshot(
@@ -173,6 +178,7 @@ mod tests {
         let outcome = TurnLoopOutcome {
             result: TurnLoopResult::Blocked { reason: Some("blocked for test".to_owned()) },
             turn_modified_files: BTreeSet::new(),
+            turn_touched_files: BTreeSet::new(),
             turn_diagnostics: Default::default(),
             pending_primary_agent: None,
             pending_plan_auto_accept: false,
@@ -230,6 +236,7 @@ mod tests {
         let outcome = TurnLoopOutcome {
             result: TurnLoopResult::Completed { plan_approved_execution_pending: false },
             turn_modified_files: BTreeSet::new(),
+            turn_touched_files: BTreeSet::new(),
             turn_diagnostics: Default::default(),
             pending_primary_agent: None,
             pending_plan_auto_accept: false,
@@ -278,6 +285,7 @@ mod tests {
         let outcome = TurnLoopOutcome {
             result: TurnLoopResult::Cancelled,
             turn_modified_files: BTreeSet::new(),
+            turn_touched_files: BTreeSet::new(),
             turn_diagnostics: Default::default(),
             pending_primary_agent: None,
             pending_plan_auto_accept: false,
@@ -326,6 +334,7 @@ mod tests {
         let outcome = TurnLoopOutcome {
             result: TurnLoopResult::Completed { plan_approved_execution_pending: false },
             turn_modified_files: BTreeSet::new(),
+            turn_touched_files: BTreeSet::new(),
             turn_diagnostics: Default::default(),
             pending_primary_agent: None,
             pending_plan_auto_accept: false,

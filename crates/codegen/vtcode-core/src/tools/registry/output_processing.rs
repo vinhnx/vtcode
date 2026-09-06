@@ -288,6 +288,11 @@ impl ToolRegistry {
 /// Provider-visible payload-body fields counted against the per-turn preview
 /// budget. Outcome/control metadata (exit codes, spool paths, truncation
 /// flags) is never counted and never stripped.
+///
+/// Keep in sync with `TOOL_PREVIEW_BODY_FIELDS` in
+/// `src/agent/runloop/unified/run_loop_context.rs` (same field list, broader
+/// visibility predicate): the two lists must agree on what counts as payload
+/// body or Layer1/Layer2 budget accounting diverges.
 const PAYLOAD_BODY_FIELDS: [&str; 5] = ["output", "preview", "content", "stdout", "stderr"];
 
 fn payload_body_bytes(value: &Value) -> usize {

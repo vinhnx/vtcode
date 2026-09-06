@@ -79,6 +79,7 @@ mod capability_tests {
             "\n\n[Runtime Tool Catalog]\n- version: 1",
             "\n\n[Deferred Tools]\n- code_search (2 tools): search",
             "\n\n[Runtime Context]\n- turns: 1",
+            "\n\n[History Directives]\n- reuse prior tool outputs",
             "\n\n[Context]\n- workspace: /tmp",
         ] {
             let with_section = format!("{base}{suffix}");
@@ -219,12 +220,19 @@ pub fn hash_tool_definitions(tools: Option<&[ToolDefinition]>) -> Option<u64> {
 /// Section boundaries share [`crate::prompts::sections::find_prompt_section_bounds`]
 /// semantics with prompt construction (`BracketOrMarkdown`), so a renamed
 /// runtime header cannot silently change cache identity.
+///
+/// Keep `RUNTIME_HEADERS` in sync with the Anthropic wire split in
+/// `vtcode-llm/src/providers/anthropic/request_builder/system.rs`
+/// (`split_runtime_context_section`): both must treat `[History Directives]`
+/// as dynamic per-turn content or cached-prefix identity diverges from the
+/// actual cache breakpoint.
 pub fn stable_system_prefix_hash(system_prompt: &str) -> u64 {
     const RUNTIME_HEADERS: &[&str] = &[
         "## Active Tools",
         "[Runtime Tool Catalog]",
         "[Deferred Tools]",
         "[Runtime Context]",
+        "[History Directives]",
         "[Context]",
     ];
     let earliest = RUNTIME_HEADERS

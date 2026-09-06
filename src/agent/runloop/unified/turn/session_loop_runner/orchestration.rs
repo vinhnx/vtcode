@@ -1144,6 +1144,7 @@ pub(crate) async fn run_single_agent_loop_unified_impl(
                         TurnLoopOutcome {
                             result: RunLoopTurnLoopResult::Aborted,
                             turn_modified_files: std::collections::BTreeSet::new(),
+                            turn_touched_files: std::collections::BTreeSet::new(),
                             turn_diagnostics: aborted_turn_diagnostics.unwrap_or_default(),
                             pending_primary_agent: None,
                             pending_plan_auto_accept: false,

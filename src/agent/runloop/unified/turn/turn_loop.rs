@@ -398,6 +398,7 @@ fn completed_turn_requires_final_response(result: &TurnLoopResult) -> bool {
 pub(crate) struct TurnLoopOutcome {
     pub result: TurnLoopResult,
     pub turn_modified_files: BTreeSet<PathBuf>,
+    pub turn_touched_files: BTreeSet<PathBuf>,
     pub turn_diagnostics: vtcode_core::core::agent::snapshots::SnapshotTurnDiagnostics,
     /// When set, the interaction loop should switch the active primary agent
     /// to this name after the turn completes.
@@ -680,6 +681,11 @@ pub(crate) async fn run_turn_loop(
     // Initialize the outcome result
     let mut result = TurnLoopResult::Completed { plan_approved_execution_pending: false };
     let mut turn_modified_files = BTreeSet::new();
+    // Snapshot the bounded session touched window so the end-of-turn
+    // checkpoint records only files touched during this turn (plus every
+    // modified file below), not stale entries from previous turns.
+    let touched_at_turn_start: std::collections::HashSet<String> =
+        ctx.session_stats.recent_touched_files().into_iter().collect();
     let mut pending_primary_agent: Option<String> = None;
     let mut pending_plan_auto_accept = false;
     let mut pending_plan_execution_context =
@@ -1647,9 +1653,23 @@ pub(crate) async fn run_turn_loop(
     let turn_diagnostics = ctx
         .harness_state
         .snapshot_turn_diagnostics(turn_usage.clone(), repeated_tool_attempts.low_signal_tool_calls);
+    // Touched files include reads/searches recorded during this turn plus
+    // every modified file, so checkpoint replay shows evidence even for
+    // read-only turns without snapshotting file contents. `recent_touched_files`
+    // is a bounded session window (last 5), so turns touching more than 5 new
+    // files keep only the most recent; that is an intentional replay-context
+    // bound, not a per-turn isolation guarantee.
+    let mut turn_touched_files: BTreeSet<PathBuf> = turn_modified_files.clone();
+    for touched in ctx.session_stats.recent_touched_files() {
+        let trimmed = touched.trim();
+        if !trimmed.is_empty() && !touched_at_turn_start.contains(trimmed) {
+            turn_touched_files.insert(PathBuf::from(trimmed));
+        }
+    }
     Ok(TurnLoopOutcome {
         result,
         turn_modified_files,
+        turn_touched_files,
         turn_diagnostics,
         pending_primary_agent,
         pending_plan_auto_accept,

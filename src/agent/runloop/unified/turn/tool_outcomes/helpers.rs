@@ -56,6 +56,7 @@ pub(crate) const PLANNING_TOTAL_LOW_SIGNAL_THRESHOLD: u8 = 10;
 pub(crate) struct LoopTracker {
     attempts: FxHashMap<String, (usize, Instant)>,
     low_signal_attempts: FxHashMap<String, (usize, Instant)>,
+    coarse_inspection_attempts: FxHashMap<String, (usize, Instant)>,
     /// Counter for consecutive mutating file operations without execution/verification
     pub consecutive_mutations: usize,
     /// True after the mutation threshold until a verification command completes.
@@ -97,6 +98,7 @@ impl LoopTracker {
         Self {
             attempts: FxHashMap::with_capacity_and_hasher(16, Default::default()),
             low_signal_attempts: FxHashMap::with_capacity_and_hasher(8, Default::default()),
+            coarse_inspection_attempts: FxHashMap::with_capacity_and_hasher(8, Default::default()),
             consecutive_mutations: 0,
             verification_pending: false,
             fix_edits_remaining: 0,
@@ -164,6 +166,7 @@ impl LoopTracker {
 
     fn reset_low_signal_attempts(&mut self) {
         self.low_signal_attempts.clear();
+        self.coarse_inspection_attempts.clear();
     }
 
     fn reset_low_signal_navigation_counters(&mut self) {
@@ -198,7 +201,7 @@ impl LoopTracker {
 
     pub(crate) fn reset_after_balancer_recovery(&mut self) {
         self.attempts.clear();
-        self.low_signal_attempts.clear();
+        self.reset_low_signal_attempts();
         self.nav_signatures.clear();
         self.consecutive_mutations = 0;
         // The mutation history is wiped, so a still-pending gate would demand
@@ -591,6 +594,38 @@ fn is_low_signal_outcome(outcome: &ToolPipelineOutcome, canonical_tool_name: &st
     }
 }
 
+/// Coarse inspection family for duplicate-listing detection. Unlike the exact
+/// `low_signal_family_key` (full normalized command), this groups overlapping
+/// scans such as three `find` invocations with different paths so successful
+/// but redundant exploration still counts toward diagnostics.
+fn coarse_inspection_family_key(canonical_tool_name: &str, args: &serde_json::Value) -> Option<String> {
+    use vtcode_core::config::constants::tools;
+    // Only shell listing/scanning commands suffer from overlapping-but-distinct
+    // invocations (e.g. three `find` calls with different paths) that the
+    // exact family key never groups. File reads (`cat`/`head`/`tail` via shell
+    // included) and semantic search already carry precise family keys;
+    // grouping them coarsely would mislabel diverse productive exploration
+    // (different files/queries) as looping.
+    match canonical_tool_name {
+        tools::UNIFIED_EXEC | tools::EXEC_COMMAND => {
+            let command = vtcode_core::tools::command_args::command_text(args).ok()??;
+            let first = command.split_whitespace().next().unwrap_or("");
+            let base = first
+                .rsplit('/')
+                .next()
+                .unwrap_or(first)
+                .trim_matches(|ch| ch == '\'' || ch == '"')
+                .to_ascii_lowercase();
+            if matches!(base.as_str(), "find" | "ls" | "rg" | "grep" | "fd") {
+                Some(format!("exec::inspection::{base}"))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Upsert a tool result into `history`, keyed on `tool_call_id`.
 ///
 /// This is a **bounded** upsert: the reverse scan stops as soon as it reaches
@@ -897,6 +932,26 @@ pub(crate) fn update_repetition_tracker(
     let low_signal_family =
         crate::agent::runloop::unified::turn::tool_outcomes::handlers::low_signal_family_key(canonical_name, args)
             .filter(|_| is_low_signal_outcome(outcome, canonical_name, args));
+    // Successful but redundant scans (e.g. three overlapping `find` calls)
+    // never match the exact family key. Track a coarse inspection family so
+    // the third repeat still surfaces in diagnostics without changing
+    // admission or blocking behavior.
+    let coarse_family = coarse_inspection_family_key(canonical_name, args);
+    let coarse_repeat = coarse_family.as_ref().map(|family| {
+        let entry = loop_tracker
+            .coarse_inspection_attempts
+            .entry(family.clone())
+            .or_insert((0, Instant::now()));
+        entry.0 = entry.0.saturating_add(1);
+        entry.1 = Instant::now();
+        entry.0
+    });
+    let is_coarse_duplicate =
+        coarse_repeat.is_some_and(|count| count >= 3) && matches!(&outcome.status, ToolExecutionStatus::Success { .. });
+    let mut low_signal_family = low_signal_family;
+    if low_signal_family.is_none() && is_coarse_duplicate {
+        low_signal_family = coarse_family.clone();
+    }
     let is_low_signal_navigation = low_signal_family.is_some();
     if let Some(low_signal_family) = low_signal_family.as_ref() {
         loop_tracker.record_low_signal(low_signal_family.clone());

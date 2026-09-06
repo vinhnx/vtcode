@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
-use vtcode_exec_events::Usage;
+use vtcode_exec_events::{Usage, deserialize_null_as_default};
 
 use crate::core::pending_actions::ExpectedOutcome;
 use crate::core::state_schema::{SchemaVersion, VersionedState};
@@ -63,6 +63,8 @@ pub struct SnapshotMetadata {
     pub description: String,
     pub message_count: usize,
     pub file_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touched_files: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,24 +91,37 @@ impl SnapshotMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SnapshotTurnDiagnostics {
+    #[serde(default)]
     pub usage: Usage,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub elapsed_ms: u64,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub requested_tool_calls: u32,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub admitted_tool_calls: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub unadmitted_tool_calls: u32,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub failed_tool_calls: u32,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub denied_tool_calls: u32,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub preflight_failures: u32,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub reused_results: u32,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub spooled_results: u32,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub raw_spooled_bytes: u64,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub model_visible_output_bytes: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub suppressed_tool_previews: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub model_visible_tool_preview_budget_exhausted: bool,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub low_signal_tool_calls: u32,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub recovery_activations: u32,
 }
 
@@ -116,6 +131,7 @@ pub struct SnapshotTurnContext {
     pub runtime_turn_id: Option<CompactStr>,
     pub session_turn_number: Option<usize>,
     pub turn_diagnostics: Option<SnapshotTurnDiagnostics>,
+    pub touched_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -475,6 +491,7 @@ impl SnapshotManager {
             description: Self::truncate_description(description_source),
             message_count: conversation.len(),
             file_count: files.len(),
+            touched_files: turn_context.touched_files.clone(),
             prompt_text,
             prompt_message_index,
             session_id: turn_context.session_id,
@@ -979,6 +996,7 @@ mod tests {
                 description: "legacy".to_string(),
                 message_count: 2,
                 file_count: 0,
+                touched_files: Vec::new(),
                 prompt_text: None,
                 prompt_message_index: None,
                 session_id: None,
@@ -1015,6 +1033,7 @@ mod tests {
                 description: "legacy".to_string(),
                 message_count: 0,
                 file_count: 0,
+                touched_files: Vec::new(),
                 prompt_text: None,
                 prompt_message_index: None,
                 session_id: None,
@@ -1070,6 +1089,7 @@ mod tests {
             runtime_turn_id: Some(CompactStr::from("turn-runtime-911")),
             session_turn_number: Some(911),
             turn_diagnostics: Some(diagnostics.clone()),
+            touched_files: Vec::new(),
         };
 
         manager

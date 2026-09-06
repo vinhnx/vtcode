@@ -719,7 +719,7 @@ impl HarnessTurnState {
     /// only bounded metadata so recovery cannot amplify one diagnostic into a
     /// recursively growing prompt.
     pub(crate) fn bound_model_visible_tool_preview(&mut self, tool_name: Option<&str>, content: String) -> String {
-        if content.is_empty() {
+        if content.is_empty() || !tool_preview_has_visible_body(&content) {
             return content;
         }
 
@@ -748,6 +748,10 @@ impl HarnessTurnState {
             metadata
         } else {
             self.model_visible_tool_metadata_bytes = MODEL_VISIBLE_TOOL_METADATA_BUDGET_BYTES;
+            // Bounded metadata overflowed the remaining budget: fall back to
+            // the minimal stub to preserve the aggregate bound. The bounded
+            // path already preserves spool_path/byte_count/completion_state
+            // for all fits-budget cases.
             generic_tool_preview_metadata(content.len())
         }
     }
@@ -1369,38 +1373,92 @@ impl HarnessTurnState {
     }
 }
 
+fn preview_spool_path(object: Option<&serde_json::Map<String, serde_json::Value>>) -> Option<String> {
+    object
+        .and_then(|value| value.get("spool_path"))
+        .and_then(serde_json::Value::as_str)
+        .map(|path| bounded_diagnosis_preview(path, TOOL_PREVIEW_METADATA_STRING_LIMIT))
+}
+
+fn preview_byte_count(object: Option<&serde_json::Map<String, serde_json::Value>>, fallback_len: usize) -> u64 {
+    object
+        .and_then(|value| {
+            [
+                "original_bytes",
+                "spooled_bytes",
+                "total_output_bytes",
+                "total_bytes",
+                "output_bytes",
+                "byte_count",
+                "bytes",
+            ]
+            .into_iter()
+            .find_map(|key| value.get(key).and_then(serde_json::Value::as_u64))
+        })
+        .unwrap_or_else(|| u64::try_from(fallback_len).unwrap_or(u64::MAX))
+}
+
+fn preview_completion_state(object: Option<&serde_json::Map<String, serde_json::Value>>) -> &'static str {
+    let Some(value) = object else {
+        return "unknown";
+    };
+    if value.get("spool_pending").and_then(serde_json::Value::as_bool) == Some(true) {
+        return "pending";
+    }
+    let exited = value.get("spool_complete").and_then(serde_json::Value::as_bool) == Some(true)
+        || value.get("is_exited").and_then(serde_json::Value::as_bool) == Some(true)
+        || value.get("exit_code").and_then(serde_json::Value::as_i64).is_some()
+        || value.get("exit_code").and_then(serde_json::Value::as_u64).is_some()
+        || value.get("success").and_then(serde_json::Value::as_bool) == Some(true)
+        || value.get("command_success").and_then(serde_json::Value::as_bool) == Some(true)
+        || matches!(value.get("status").and_then(serde_json::Value::as_str), Some("completed" | "success"))
+        || matches!(value.get("outcome").and_then(serde_json::Value::as_str), Some("completed" | "success"));
+    if exited { "complete" } else { "unknown" }
+}
+
+/// Payload-body fields counted against the preview budget. Outcome/control
+/// metadata alone must not consume budget or trigger suppression.
+///
+/// Keep in sync with `PAYLOAD_BODY_FIELDS` in
+/// `crates/codegen/vtcode-core/src/tools/registry/output_processing.rs` (same
+/// field list; this side uses a broader visibility predicate covering
+/// non-string bodies): the two lists must agree or Layer1/Layer2 accounting
+/// diverges.
+const TOOL_PREVIEW_BODY_FIELDS: [&str; 5] = ["output", "preview", "content", "stdout", "stderr"];
+
+fn tool_preview_body_value_is_visible(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => !text.is_empty(),
+        serde_json::Value::Array(items) => !items.is_empty(),
+        serde_json::Value::Object(map) => !map.is_empty(),
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) => true,
+        serde_json::Value::Null => false,
+    }
+}
+
+fn tool_preview_has_visible_body(content: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        // Non-JSON previews (plain text) always consume budget.
+        return true;
+    };
+    let Some(object) = value.as_object() else {
+        return !content.is_empty();
+    };
+    TOOL_PREVIEW_BODY_FIELDS
+        .iter()
+        .filter_map(|field| object.get(*field))
+        .any(tool_preview_body_value_is_visible)
+}
+
 fn bounded_tool_preview_metadata(tool_name: Option<&str>, content: &str) -> String {
     let parsed = (content.len() <= TOOL_PREVIEW_METADATA_PARSE_LIMIT_BYTES)
         .then(|| serde_json::from_str::<serde_json::Value>(content).ok())
         .flatten();
     let object = parsed.as_ref().and_then(serde_json::Value::as_object);
 
-    let spool_path = object
-        .and_then(|value| value.get("spool_path"))
-        .and_then(serde_json::Value::as_str)
-        .map(|path| bounded_diagnosis_preview(path, TOOL_PREVIEW_METADATA_STRING_LIMIT));
-    let byte_count = object
-        .and_then(|value| {
-            ["original_bytes", "spooled_bytes", "output_bytes", "bytes"]
-                .into_iter()
-                .find_map(|key| value.get(key).and_then(serde_json::Value::as_u64))
-        })
-        .unwrap_or_else(|| u64::try_from(content.len()).unwrap_or(u64::MAX));
-    let completion_state = object
-        .and_then(|value| {
-            if value.get("spool_pending").and_then(serde_json::Value::as_bool) == Some(true) {
-                Some("pending")
-            } else if value.get("spool_complete").and_then(serde_json::Value::as_bool) == Some(true)
-                || value.get("is_exited").and_then(serde_json::Value::as_bool) == Some(true)
-                || value.get("exit_code").and_then(serde_json::Value::as_i64).is_some()
-                || value.get("status").and_then(serde_json::Value::as_str) == Some("completed")
-            {
-                Some("complete")
-            } else {
-                None
-            }
-        })
-        .unwrap_or("unknown");
+    let spool_path = preview_spool_path(object);
+    let byte_count = preview_byte_count(object, content.len());
+    let completion_state = preview_completion_state(object);
 
     let diagnosis = object
         .and_then(|value| value.get("diagnosis"))
