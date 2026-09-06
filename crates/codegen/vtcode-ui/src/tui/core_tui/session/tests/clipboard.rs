@@ -32,6 +32,11 @@ fn double_click_selects_transcript_word_and_copies_it() {
     let _temp_guard = TempDirGuard(temp_dir.clone());
 
     let clipboard_file = temp_dir.join("clipboard.txt");
+    // Create the destination before launching the detached helper. Under
+    // parallel nextest load the helper can take longer than the bounded
+    // native-copy wait to start; an empty file lets the poll distinguish that
+    // startup delay from a failed copy without racing filesystem creation.
+    fs::write(&clipboard_file, "").expect("create clipboard fixture");
     let script_name = if cfg!(target_os = "macos") { "pbcopy" } else { "xclip" };
     let script_path = temp_dir.join(script_name);
     fs::write(&script_path, format!("#!/bin/sh\ncat > '{}'\n", clipboard_file.display()))
@@ -96,6 +101,15 @@ fn double_click_selects_transcript_word_and_copies_it() {
     session.mouse_selection.mark_copied();
     assert!(!session.mouse_selection.needs_copy());
 
+    // Clipboard helpers are intentionally bounded and may finish just after
+    // the copy call returns on a busy macOS host. Give the detached helper a
+    // short grace period before asserting on its fixture output.
+    for _ in 0..100 {
+        if fs::read_to_string(&clipboard_file).is_ok_and(|contents| contents == "hello") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let clipboard_contents = fs::read_to_string(&clipboard_file).expect("read copied transcript text");
     assert_eq!(clipboard_contents, "hello");
 
@@ -138,6 +152,7 @@ fn selecting_input_text_auto_copies_and_keeps_selection() {
     let _temp_guard = TempDirGuard(temp_dir.clone());
 
     let clipboard_file = temp_dir.join("clipboard.txt");
+    fs::write(&clipboard_file, "").expect("create clipboard fixture");
     let script_name = if cfg!(target_os = "macos") { "pbcopy" } else { "xclip" };
     let script_path = temp_dir.join(script_name);
     fs::write(&script_path, format!("#!/bin/sh\ncat > '{}'\n", clipboard_file.display()))
@@ -170,6 +185,12 @@ fn selecting_input_text_auto_copies_and_keeps_selection() {
         "input copy should surface a temporary confirmation"
     );
 
+    for _ in 0..100 {
+        if fs::read_to_string(&clipboard_file).is_ok_and(|contents| contents == "world") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let clipboard_contents = fs::read_to_string(&clipboard_file).expect("read copied input text");
     assert_eq!(clipboard_contents, "world");
 
@@ -188,7 +209,6 @@ fn transcript_copy_failure_surfaces_copy_failed_status() {
     use crate::tui::core_tui::session::mouse_selection::{
         clipboard_command_override, set_clipboard_command_override, set_osc52_write_override,
     };
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     let _guard = CLIPBOARD_TEST_LOCK.lock().expect("clipboard test lock should not be poisoned");
@@ -202,32 +222,9 @@ fn transcript_copy_failure_surfaces_copy_failed_status() {
     }
     let _overrides = OverrideGuard;
 
-    let temp_dir = std::env::temp_dir().join(format!(
-        "vtcode-clipboard-fail-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock should be after UNIX_EPOCH")
-            .as_nanos()
-    ));
-    fs::create_dir_all(&temp_dir).expect("create temp dir for clipboard script");
-    struct TempDirGuard(PathBuf);
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-    let _temp_guard = TempDirGuard(temp_dir.clone());
-
-    let script_path = temp_dir.join("xclip");
-    fs::write(&script_path, "#!/bin/sh\nexit 1\n").expect("write failing clipboard command");
-    let mut permissions = fs::metadata(&script_path)
-        .expect("read failing clipboard metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script_path, permissions).expect("make failing clipboard executable");
-
-    set_clipboard_command_override(Some(script_path.clone()));
+    // An unspawnable helper fails before the bounded clipboard poll starts,
+    // keeping this failure-path assertion deterministic under parallel load.
+    set_clipboard_command_override(Some(PathBuf::from("/vtcode-test/missing-clipboard-helper")));
     set_osc52_write_override(Some(false));
 
     let mut session = Session::new(InlineTheme::default(), None, VIEW_ROWS);
@@ -251,7 +248,6 @@ fn input_copy_failure_is_swallowed_without_interrupt_and_never_retries() {
     use crate::tui::core_tui::session::mouse_selection::{
         clipboard_command_override, set_clipboard_command_override, set_osc52_write_override,
     };
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     let _guard = CLIPBOARD_TEST_LOCK.lock().expect("clipboard test lock should not be poisoned");
@@ -265,32 +261,9 @@ fn input_copy_failure_is_swallowed_without_interrupt_and_never_retries() {
     }
     let _overrides = OverrideGuard;
 
-    let temp_dir = std::env::temp_dir().join(format!(
-        "vtcode-clipboard-fail-input-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock should be after UNIX_EPOCH")
-            .as_nanos()
-    ));
-    fs::create_dir_all(&temp_dir).expect("create temp dir for clipboard script");
-    struct TempDirGuard(PathBuf);
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-    let _temp_guard = TempDirGuard(temp_dir.clone());
-
-    let script_path = temp_dir.join("xclip");
-    fs::write(&script_path, "#!/bin/sh\nexit 1\n").expect("write failing clipboard command");
-    let mut permissions = fs::metadata(&script_path)
-        .expect("read failing clipboard metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script_path, permissions).expect("make failing clipboard executable");
-
-    set_clipboard_command_override(Some(script_path.clone()));
+    // An unspawnable helper fails before the bounded clipboard poll starts,
+    // keeping this failure-path assertion deterministic under parallel load.
+    set_clipboard_command_override(Some(PathBuf::from("/vtcode-test/missing-clipboard-helper")));
     set_osc52_write_override(Some(false));
 
     let mut session = app_session_with_input("hello world", "hello world".len());
@@ -308,6 +281,13 @@ fn input_copy_failure_is_swallowed_without_interrupt_and_never_retries() {
     let result = session.process_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert!(result.is_none(), "Ctrl+C over a selection must stay a copy attempt even when copying fails");
 
-    let rendered = rendered_app_session_lines(&mut session, VIEW_ROWS);
-    assert!(rendered.iter().any(|line| line.contains("Copy failed")));
+    let status = session
+        .core
+        .render_input_status_line(VIEW_WIDTH)
+        .expect("input status line after failed copy")
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(status.contains("Copy failed"), "failed copy should remain visible, got: {status}");
 }

@@ -579,6 +579,7 @@ mod tests {
 
         ZedAgent::new(
             core_config,
+            false,
             AuthCredentialsStoreMode::default(),
             AgentClientProtocolZedConfig::default(),
             ToolsConfig::default(),

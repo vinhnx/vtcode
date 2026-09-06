@@ -621,3 +621,19 @@ RUST_LOG=debug cargo run
 
 -   [docs/development/EXECUTION_POLICY.md](./EXECUTION_POLICY.md) - Overall execution policy
 -   [crates/codegen/vtcode-config/src/core/commands.rs](../../crates/codegen/vtcode-config/src/core/commands.rs) - Implementation
+
+## Shared preflight and process boundaries
+
+All providers use the same command preflight. Literal input/output redirection
+destinations are validated before command classification removes shell plumbing;
+dynamic destinations are rejected. Ordinary log files, descriptor duplication,
+and `/dev/null` remain supported. Filesystem authorization resolves current
+symlink targets for every operation; previous resolutions are never reused as
+permission evidence. This preflight complements the OS sandbox and cannot alone
+eliminate concurrent filesystem replacement races.
+
+Restrictive sandbox launches reconstruct the environment from the central
+allowlist after caller overrides. Arbitrary names are not inherited, including
+credentials that do not match familiar token/key suffixes. Explicit full-access
+and externally managed sandbox policies preserve their existing environment
+semantics.

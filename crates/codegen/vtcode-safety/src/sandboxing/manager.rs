@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use super::child_spawn::filter_sensitive_env;
+use super::child_spawn::build_sanitized_env;
 use super::exec_env::{CommandSpec, ExecEnv, SandboxType};
 #[cfg(target_os = "macos")]
 use super::policy::NetworkAllowlistEntry;
@@ -57,7 +57,7 @@ impl SandboxManager {
             spec
         } else {
             let mut spec = spec;
-            spec.env = filter_sensitive_env(&spec.env);
+            spec.env = build_sanitized_env(&spec.env, false, false, "", &[]);
             spec
         };
 
@@ -391,6 +391,8 @@ mod tests {
         drop(env.insert("OPENAI_API_KEY".to_string(), "secret-value".to_string()));
         drop(env.insert("LD_PRELOAD".to_string(), "injected.so".to_string()));
         drop(env.insert("SAFE_PROJECT_NAME".to_string(), "vtcode".to_string()));
+        drop(env.insert("PATH".to_string(), "/usr/bin:/bin".to_string()));
+        drop(env.insert("INTERNAL_AUTH_BLOB".to_string(), "secret".to_string()));
         let spec = CommandSpec::new("echo").with_env(env);
         let sandbox_helper = if cfg!(target_os = "linux") {
             Some(Path::new("/tmp/vtcode-test-sandbox-helper"))
@@ -405,6 +407,24 @@ mod tests {
         assert!(transformed.sandbox_active);
         assert!(!transformed.env.contains_key("OPENAI_API_KEY"));
         assert!(!transformed.env.contains_key("LD_PRELOAD"));
-        assert_eq!(transformed.env.get("SAFE_PROJECT_NAME"), Some(&"vtcode".to_string()));
+        assert!(!transformed.env.contains_key("INTERNAL_AUTH_BLOB"));
+        assert!(!transformed.env.contains_key("SAFE_PROJECT_NAME"));
+        assert_eq!(transformed.env.get("PATH"), Some(&"/usr/bin:/bin".to_string()));
+    }
+    #[test]
+    fn explicit_full_access_preserves_caller_environment() {
+        let manager = SandboxManager::new();
+        let mut env = hashbrown::HashMap::new();
+        drop(env.insert("INTERNAL_AUTH_BLOB".to_string(), "explicit".to_string()));
+        let result = manager
+            .transform(
+                CommandSpec::new("echo").with_env(env.clone()),
+                &SandboxPolicy::full_access(),
+                Path::new("."),
+                None,
+            )
+            .expect("full access transform");
+        assert!(!result.sandbox_active);
+        assert_eq!(result.env, env);
     }
 }

@@ -68,7 +68,6 @@ const GATED_SAMPLING_MODELS: &[&str] = &[
     openai_models::GPT_5_6_SOL,
 ];
 const SAMPLING_DISABLED_MODELS: &[&str] = &[
-    openai_models::GPT_6_ASTRA,
     openai_models::GPT_5,
     openai_models::GPT_5_6_SOL,
     openai_models::GPT_5_MINI,
@@ -91,6 +90,7 @@ pub(crate) struct ResponsesRequestContext<'a> {
     pub supports_parallel_tool_config: bool,
     pub supports_temperature: bool,
     pub supports_reasoning_effort: bool,
+    pub supported_reasoning_efforts: &'a [&'a str],
     pub supports_reasoning: bool,
     pub is_responses_api_model: bool,
     pub include_max_output_tokens: bool,
@@ -140,7 +140,7 @@ fn is_gpt56_model(model: &str) -> bool {
 }
 
 fn is_openai_gpt_responses_model(model: &str) -> bool {
-    model == openai_models::GPT || model.starts_with(openai_models::GPT_5) || openai_models::is_gpt6_astra_model(model)
+    openai_models::RESPONSES_API_MODELS.contains(&model)
 }
 
 fn supports_assistant_phase_replay(model: &str) -> bool {
@@ -150,7 +150,11 @@ fn supports_assistant_phase_replay(model: &str) -> bool {
 fn default_replay_instructions(model: &str) -> Option<String> {
     if is_gpt5_codex_model(model) {
         Some(format!("You are Codex, based on GPT-5. {}", default_system_prompt()))
-    } else if is_gpt55_model(model) || is_gpt56_model(model) || openai_models::is_gpt6_astra_model(model) {
+    } else if is_gpt55_model(model)
+        || is_gpt56_model(model)
+        || vtcode_config::models::model_catalog_entry("openai", model)
+            .is_some_and(|entry| entry.prompt_contract.is_some())
+    {
         Some(default_system_prompt())
     } else {
         None
@@ -158,15 +162,14 @@ fn default_replay_instructions(model: &str) -> Option<String> {
 }
 
 fn augment_openai_instructions(model: &str, instructions: String) -> String {
-    let addendum = if openai_models::is_gpt6_astra_model(model) {
-        Some(openai_gpt6_contract_addendum())
-    } else if is_gpt56_model(model) {
-        Some(openai_gpt56_contract_addendum())
-    } else if is_gpt55_model(model) {
-        Some(openai_gpt55_contract_addendum())
-    } else {
-        None
-    };
+    let addendum =
+        match vtcode_config::models::model_catalog_entry("openai", model).and_then(|entry| entry.prompt_contract) {
+            Some("gpt6") => Some(openai_gpt6_contract_addendum()),
+            Some("gpt56") => Some(openai_gpt56_contract_addendum()),
+            _ if is_gpt56_model(model) => Some(openai_gpt56_contract_addendum()),
+            _ if is_gpt55_model(model) => Some(openai_gpt55_contract_addendum()),
+            _ => None,
+        };
 
     let Some(addendum) = addendum else {
         return instructions;
@@ -279,7 +282,12 @@ fn trimmed_non_empty(value: Option<&str>) -> Option<&str> {
 }
 
 fn allows_sampling_parameters(model: &str, reasoning_effort: Option<ReasoningEffortLevel>) -> bool {
-    if GATED_SAMPLING_MODELS.contains(&model) {
+    let supports_sampling = vtcode_config::models::model_catalog_entry("openai", model)
+        .map(|entry| entry.supports_sampling)
+        .unwrap_or_else(|| !SAMPLING_DISABLED_MODELS.contains(&model));
+    if !supports_sampling {
+        false
+    } else if GATED_SAMPLING_MODELS.contains(&model) {
         matches!(reasoning_effort.unwrap_or(ReasoningEffortLevel::None), ReasoningEffortLevel::None)
     } else {
         !SAMPLING_DISABLED_MODELS.contains(&model)
@@ -572,16 +580,14 @@ fn build_responses_request_from_history(
         typed_parameters.prompt_cache_key = Some(prompt_cache_key.to_string());
     }
 
-    // GPT-6 Astra follows the GPT-5.6-and-later cache scheme: lifetime is
-    // controlled by `prompt_cache_options.ttl`, not `prompt_cache_retention`.
-    // https://developers.openai.com/api/docs/guides/prompt-caching#summary-of-model-differences
-    let is_gpt6_astra = openai_models::is_gpt6_astra_model(&request.model);
-    if is_gpt6_astra
+    let cache_ttl = vtcode_config::models::model_catalog_entry("openai", &request.model)
+        .and_then(|entry| entry.prompt_cache_ttl)
+        .and_then(|ttl| trimmed_non_empty(Some(ttl)));
+    if let Some(ttl) = cache_ttl
         && ctx.include_prompt_cache_retention
         && ctx.is_responses_api_model
-        && trimmed_non_empty(ctx.prompt_cache_retention).is_some()
     {
-        openai_request["prompt_cache_options"] = json!({ "ttl": "30m" });
+        openai_request["prompt_cache_options"] = json!({ "ttl": ttl });
     } else if ctx.include_prompt_cache_retention
         && ctx.is_responses_api_model
         && let Some(retention) = trimmed_non_empty(ctx.prompt_cache_retention)
@@ -600,8 +606,9 @@ fn build_responses_request_from_history(
     if ctx.include_encrypted_reasoning {
         push_unique_include(&mut include_values, "reasoning.encrypted_content");
     }
-    if is_gpt6_astra {
-        // GPT-6 Astra does not support logprobs output.
+    let supports_logprobs = vtcode_config::models::model_catalog_entry("openai", &request.model)
+        .is_none_or(|entry| entry.supports_logprobs);
+    if !supports_logprobs {
         include_values.retain(|field| field != "message.output_text.logprobs");
     }
     if !include_values.is_empty() {
@@ -697,9 +704,18 @@ fn build_responses_request_from_history(
 
     if ctx.supports_reasoning_effort {
         if let Some(effort) = request.reasoning_effort {
-            if let Some(payload) =
-                RigProviderCapabilities::new(ModelProvider::OpenAI, &request.model).reasoning_parameters(effort)
-            {
+            // The typed adapter validates native catalog models. A custom
+            // OpenAI-compatible route can advertise effort support for a
+            // model absent from the built-in catalog; that capability was
+            // already resolved by the provider trait, so preserve its exact
+            // value instead of applying native catalog validation.
+            let payload = if ctx.is_responses_api_model {
+                RigProviderCapabilities::new(ModelProvider::OpenAI, &request.model)
+                    .reasoning_parameters_for_supported_efforts(effort, ctx.supported_reasoning_efforts)?
+            } else {
+                Some(json!({ "effort": effort.as_str() }))
+            };
+            if let Some(payload) = payload {
                 openai_request["reasoning"] = payload;
             } else {
                 openai_request["reasoning"] = json!({ "effort": effort.as_str() });
@@ -792,6 +808,7 @@ mod tests {
             supports_parallel_tool_config: false,
             supports_temperature: true,
             supports_reasoning_effort: true,
+            supported_reasoning_efforts: &["low", "medium", "high", "xhigh", "max"],
             supports_reasoning: true,
             is_responses_api_model: true,
             include_max_output_tokens: true,

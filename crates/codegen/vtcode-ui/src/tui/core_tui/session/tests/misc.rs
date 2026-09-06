@@ -628,3 +628,36 @@ fn alt_backspace_deletes_previous_cyrillic_word() {
     assert!(result.is_none());
     assert_eq!(session.input_manager.content(), "привет ");
 }
+
+#[test]
+fn overlay_retains_input_ownership_across_activity_transitions() {
+    use crate::tui::core_tui::session::input_manager::InputOwner;
+    for initial in [
+        ActivityState::Idle,
+        ActivityState::StartingBuild,
+        ActivityState::Building,
+    ] {
+        for next in [
+            ActivityState::Idle,
+            ActivityState::StartingBuild,
+            ActivityState::Building,
+            ActivityState::Blocked,
+        ] {
+            let mut session = Session::new(InlineTheme::default(), None, VIEW_ROWS);
+            session.handle_command(InlineCommand::SetActivityState(initial));
+            session.handle_command(InlineCommand::ShowOverlay {
+                request: Box::new(OverlayRequest::Modal(crate::tui::core_tui::types::ModalOverlayRequest {
+                    title: "Ownership".to_string(),
+                    lines: Vec::new(),
+                    secure_prompt: None,
+                    is_help_modal: false,
+                })),
+            });
+            session.handle_command(InlineCommand::SetActivityState(next));
+            assert_eq!(session.input_owner(), InputOwner::Overlay);
+            assert!(!session.input_enabled());
+            session.close_overlay();
+            assert_eq!(session.input_enabled(), !next.is_busy(), "{initial:?} -> {next:?}");
+        }
+    }
+}

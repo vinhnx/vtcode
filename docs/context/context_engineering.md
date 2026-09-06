@@ -247,10 +247,11 @@ include_in_prompt = true
 preserve_in_compression = true
 ```
 
-`context.max_context_tokens` is the session prompt safety budget. With no
-explicit harness compaction threshold, VT Code compacts at 90% of the smaller
-of this budget and the provider's hard context capacity. Set it to `0` only to
-restore provider-only threshold resolution.
+`context.max_context_tokens` is the optional session prompt safety ceiling. With
+no explicit harness compaction threshold, VT Code compacts when the estimated
+request input plus reserved output reaches the smaller of this ceiling, the
+resolved model capacity, and the provider route capacity. Set it to `0` to use
+the resolved capacity without an additional session ceiling.
 
 ## Best Practices
 

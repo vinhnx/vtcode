@@ -200,6 +200,7 @@ impl PtyManager {
                 &workspace_root,
                 &extra_paths,
                 &extra_env,
+                &HashMap::new(),
                 sandbox_active,
             );
 
@@ -478,6 +479,7 @@ impl PtyManager {
             size,
             extra_env,
             zsh_exec_bridge,
+            HashMap::new(),
             false,
         )
     }
@@ -490,6 +492,7 @@ impl PtyManager {
         size: PtySize,
         extra_env: HashMap<String, String>,
         zsh_exec_bridge: Option<crate::zsh_exec_bridge::ZshExecBridgeSession>,
+        trusted_env: HashMap<String, String>,
         sandbox_active: bool,
     ) -> Result<VTCodePtySession> {
         if command.is_empty() {
@@ -552,6 +555,7 @@ impl PtyManager {
             &self.workspace_root,
             &extra_paths,
             &extra_env,
+            &trusted_env,
             sandbox_active,
         );
 

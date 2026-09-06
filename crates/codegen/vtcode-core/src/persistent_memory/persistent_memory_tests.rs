@@ -1,5 +1,4 @@
 use super::*;
-use crate::config::models::ModelId;
 use crate::llm::provider::{
     FinishReason, LLMError, LLMNormalizedStream, LLMProvider, LLMRequest, LLMResponse, NormalizedStreamEvent,
 };
@@ -1030,7 +1029,9 @@ fn resolve_memory_model_route_prefers_explicit_small_model_provider() {
     let routes = resolve_memory_model_routes(&runtime, Some(&vt_cfg), MemoryPhase::Extract);
 
     assert_eq!(routes.primary.provider_name, "openai");
-    assert_eq!(routes.primary.model, ModelId::GPT56Luna.as_str());
+    // `gpt-5` is a deprecated but still valid provider route without a
+    // catalog sibling; preserve it instead of selecting an unrelated model.
+    assert_eq!(routes.primary.model, "gpt-5");
     assert!(routes.warning.is_some());
 }
 

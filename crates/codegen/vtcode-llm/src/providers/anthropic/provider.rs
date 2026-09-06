@@ -594,6 +594,17 @@ impl LLMProvider for AnthropicProvider {
                 .unwrap_or(false)
     }
 
+    fn supported_reasoning_efforts(&self, model: &str) -> &'static [&'static str] {
+        capabilities::allowed_efforts_for_model(model, &self.model).unwrap_or_else(|| {
+            self.model_behavior
+                .as_ref()
+                .and_then(|behavior| behavior.model_supports_reasoning_effort)
+                .filter(|supported| *supported)
+                .map(|_| crate::provider::GENERIC_REASONING_EFFORTS)
+                .unwrap_or(&[])
+        })
+    }
+
     fn supports_reasoning_effort(&self, model: &str) -> bool {
         // Same robustness logic for reasoning effort
         capabilities::supports_reasoning_effort(model, &self.model)

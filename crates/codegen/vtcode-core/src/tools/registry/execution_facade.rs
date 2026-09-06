@@ -24,6 +24,7 @@ use crate::tools::invocation::ToolInvocationId;
 use crate::tools::mcp::{legacy_mcp_tool_name, parse_canonical_mcp_tool_name};
 use crate::tools::request_response::{ToolCallRequest, ToolCallResponse};
 use crate::tools::safety_gateway::{SafetyContext, SafetyDecision, SafetyError as GatewaySafetyError};
+use crate::tools::tool_intent;
 use crate::tools::unified_error::UnifiedErrorKind;
 use crate::tools::unified_error::UnifiedToolError;
 use crate::ui::search::fuzzy_match;
@@ -42,6 +43,17 @@ const REENTRANCY_STACK_DEPTH_LIMIT: usize = 64;
 /// cached results and return a hard error instead.  Must be greater than
 /// MIN_READONLY_IDENTICAL_LIMIT (currently 2).
 const LOOP_HARD_BLOCK_REPEAT_COUNT: usize = 5;
+
+fn requests_unsandboxed_shell_permissions(tool_name: &str, args: &Value) -> bool {
+    if !tool_intent::is_command_run_tool_call(tool_name, args) {
+        return false;
+    }
+
+    matches!(
+        args.get("sandbox_permissions").and_then(Value::as_str),
+        Some(value) if value.eq_ignore_ascii_case("require_escalated") || value.eq_ignore_ascii_case("bypass_sandbox")
+    )
+}
 // Tools should never recursively re-enter themselves in a single task.
 // Keeping this at 1 blocks the first re-entry (A -> ... -> A) to fail fast
 // on alias/self-recursion bugs with minimal extra work.
@@ -314,6 +326,17 @@ impl ToolRegistry {
     async fn execute_tool_request_internal(&self, request: ToolExecutionRequest) -> ToolExecutionOutcome {
         let tool_name = &request.tool_name;
         let policy = request.policy.clone();
+
+        if requests_unsandboxed_shell_permissions(tool_name, &request.args) {
+            let message = format!(
+                "sandbox_permissions in `{tool_name}` requires an enforced operator approval decision before unsandboxed execution"
+            );
+            let error = ToolExecutionError::new(tool_name.clone(), ToolErrorType::PolicyViolation, message)
+                .with_tool_call_context(tool_name, &request.args)
+                .with_surface("tool_registry");
+            return ToolExecutionOutcome::failure(tool_name.clone(), 1, error);
+        }
+
         let mut retry_policy = crate::retry::RetryPolicy::from_retries(
             policy.max_retries as u32,
             policy.retry_base_delay,
@@ -477,10 +500,10 @@ impl ToolRegistry {
             return false;
         }
 
-        if !crate::tools::tool_intent::command_session_action_in(args, &["poll", "continue"]) {
+        if !tool_intent::command_session_action_in(args, &["poll", "continue"]) {
             return false;
         }
-        if crate::tools::tool_intent::command_session_action_is(args, "continue")
+        if tool_intent::command_session_action_is(args, "continue")
             && crate::tools::command_args::interactive_input_text(args).is_some()
         {
             return false;
@@ -826,7 +849,7 @@ impl ToolRegistry {
         // Classify the tool intent once and reuse it for the read-only
         // classification and the planning-workflow enforcement below, instead
         // of recomputing it on every tool call.
-        let intent = crate::tools::tool_intent::classify_tool_intent(&tool_name, args);
+        let intent = tool_intent::classify_tool_intent(&tool_name, args);
         let readonly_classification = if prevalidated {
             #[cfg(debug_assertions)]
             {
@@ -998,10 +1021,8 @@ impl ToolRegistry {
         // must always re-execute: reusing a stale success would clear the
         // anti-blind-editing gate without verifying the current worktree, and
         // reusing a stale failure would keep the gate pending after a fix.
-        let is_verification_command = matches!(
-            crate::tools::tool_intent::classify_shell_activity(&tool_name, args),
-            crate::tools::tool_intent::ShellActivity::Verification
-        );
+        let is_verification_command =
+            matches!(tool_intent::classify_shell_activity(&tool_name, args), tool_intent::ShellActivity::Verification);
         if readonly_classification && !is_verification_command && !skip_loop_detection {
             let fast_reuse_max_age = Duration::from_secs(60);
             let fast_reused = self
@@ -1721,7 +1742,7 @@ impl ToolRegistry {
                 self.record_tool_latency(timeout_category, execution_started_at.elapsed());
                 // Dynamic context discovery: spool large outputs to files
                 let mut value = value;
-                if crate::tools::tool_intent::is_spool_file_read_command(&tool_name_owned, &args_for_recording) {
+                if tool_intent::is_spool_file_read_command(&tool_name_owned, &args_for_recording) {
                     if let Some(output) = value.as_object_mut() {
                         output.insert("no_spool".to_string(), json!(true));
                     } else {

@@ -48,4 +48,7 @@ pub struct EvalRunResult {
     pub attempt: u32,
     pub cost_usd: Option<f64>,
     pub transcript_path: Option<String>,
+    /// Privacy-preserving summary of the attempt trace, when it was persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_summary: Option<crate::trace_analyzer::HarnessTraceSummary>,
 }

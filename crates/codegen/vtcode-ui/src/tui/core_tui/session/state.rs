@@ -227,12 +227,26 @@ impl Session {
         &self.modal_link_targets
     }
 
+    pub(crate) fn input_owner(&self) -> super::input_manager::InputOwner {
+        use super::input_manager::InputOwner;
+        if self.has_active_overlay() {
+            InputOwner::Overlay
+        } else if self.input_enabled && !self.activity_state.is_busy() {
+            InputOwner::Composer
+        } else {
+            InputOwner::Runtime
+        }
+    }
+
     pub(crate) fn input_enabled(&self) -> bool {
-        self.input_enabled
+        self.input_owner() == super::input_manager::InputOwner::Composer
     }
 
     pub(crate) fn set_input_enabled(&mut self, enabled: bool) {
-        self.input_enabled = enabled;
+        if let Some(ActiveOverlay::Modal(state)) = self.active_overlay.as_mut() {
+            state.restore_input = enabled;
+        }
+        self.input_enabled = enabled && !self.has_active_overlay();
     }
 
     pub(crate) fn image_input_enabled(&self) -> bool {
@@ -634,8 +648,8 @@ impl Session {
         self.modal_text_areas.clear();
         self.modal_link_targets.clear();
         self.cache_last_overlay_list_state(&state);
-        self.input_enabled = state.restore_input();
-        self.cursor_visible = state.restore_cursor();
+        self.input_enabled = state.restore_input() && !self.activity_state.is_busy();
+        self.cursor_visible = state.restore_cursor() && !self.activity_state.is_busy();
 
         if let Some(next_request) = self.overlay_queue.pop_front() {
             self.activate_overlay(next_request);

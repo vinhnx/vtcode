@@ -44,6 +44,7 @@ tokio = { workspace = true, features = [
 tokio-util = { workspace = true, features = ["codec"] }
 async-process = "2.2"
 futures = { workspace = true }
+fs2 = { workspace = true }
 async-stream = "0.3"
 base64 = { workspace = true }
 glob = "0.3"

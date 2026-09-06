@@ -16,6 +16,8 @@ use tokio::fs;
 
 use crate::image::has_supported_image_extension;
 
+pub mod bound_file;
+
 /// Ensure a directory exists, creating it if necessary
 pub async fn ensure_dir_exists(path: &Path) -> Result<()> {
     if !path.exists() {

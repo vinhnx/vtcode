@@ -42,6 +42,7 @@
         },
         "reasoning_efforts": [
           "low",
+          "medium",
           "high"
         ]
       },
@@ -77,6 +78,7 @@
         },
         "reasoning_efforts": [
           "low",
+          "medium",
           "high"
         ]
       },
@@ -112,6 +114,7 @@
         },
         "reasoning_efforts": [
           "low",
+          "medium",
           "high"
         ]
       },
@@ -147,6 +150,7 @@
         },
         "reasoning_efforts": [
           "low",
+          "medium",
           "high"
         ]
       },
@@ -374,6 +378,10 @@
           "structured_output": true,
           "thinking": true
         },
+        "supports_sampling": false,
+        "supports_logprobs": false,
+        "prompt_cache_ttl": "30m",
+        "prompt_contract": "gpt6",
         "cost": {
           "input": 1e-05,
           "output": 5e-05,
@@ -715,7 +723,13 @@
         "context": 131072,
         "capabilities": {
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "openai/gpt-oss-120b": {
         "id": "openai/gpt-oss-120b",
@@ -734,7 +748,13 @@
         "context": 131072,
         "capabilities": {
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "zai-org/GLM-5.2:novita": {
         "id": "zai-org/GLM-5.2:novita",
@@ -755,7 +775,13 @@
         "capabilities": {
           "structured_output": true
         },
-        "is_pro": true
+        "is_pro": true,
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "zai-org/GLM-5.3-Flash:together": {
         "id": "zai-org/GLM-5.3-Flash:together",
@@ -777,7 +803,13 @@
         "capabilities": {
           "structured_output": true
         },
-        "is_pro": true
+        "is_pro": true,
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "zai-org/GLM-5.3:together": {
         "id": "zai-org/GLM-5.3:together",
@@ -798,7 +830,13 @@
         "capabilities": {
           "structured_output": true
         },
-        "is_pro": true
+        "is_pro": true,
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "Qwen/Qwen3-4B-Thinking-2507": {
         "id": "Qwen/Qwen3-4B-Thinking-2507",
@@ -817,7 +855,13 @@
         "context": 32768,
         "capabilities": {
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "Qwen/Qwen2.5-7B-Instruct-1M": {
         "id": "Qwen/Qwen2.5-7B-Instruct-1M",
@@ -836,7 +880,13 @@
         "context": 1048576,
         "capabilities": {
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "Qwen/Qwen2.5-Coder-32B-Instruct": {
         "id": "Qwen/Qwen2.5-Coder-32B-Instruct",
@@ -855,7 +905,13 @@
         "context": 131072,
         "capabilities": {
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "deepseek-ai/DeepSeek-R1": {
         "id": "deepseek-ai/DeepSeek-R1",
@@ -874,7 +930,13 @@
         "context": 131072,
         "capabilities": {
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "deepseek-ai/DeepSeek-V3.2": {
         "id": "deepseek-ai/DeepSeek-V3.2",
@@ -893,7 +955,13 @@
         "context": 131072,
         "capabilities": {
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "openai/gpt-oss-20b": {
         "id": "openai/gpt-oss-20b",
@@ -912,7 +980,13 @@
         "context": 131072,
         "capabilities": {
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "zai-org/GLM-5-Flash:novita": {
         "id": "zai-org/GLM-5-Flash:novita",
@@ -931,7 +1005,13 @@
         "context": 200000,
         "capabilities": {
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "stepfun-ai/Step-3.5-Flash:featherless-ai": {
         "id": "stepfun-ai/Step-3.5-Flash:featherless-ai",
@@ -951,7 +1031,13 @@
         "capabilities": {
           "structured_output": true,
           "streaming": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "deepseek-ai/DeepSeek-V4-Flash:novita": {
         "id": "deepseek-ai/DeepSeek-V4-Flash:novita",
@@ -970,7 +1056,13 @@
         "context": 1048576,
         "capabilities": {
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "deepseek-ai/DeepSeek-V4-Pro:together": {
         "id": "deepseek-ai/DeepSeek-V4-Pro:together",
@@ -991,7 +1083,13 @@
           "structured_output": true
         },
         "is_pro": true,
-        "lightweight_model": "deepseek-ai/DeepSeek-V4-Flash:novita"
+        "lightweight_model": "deepseek-ai/DeepSeek-V4-Flash:novita",
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "MiniMaxAI/MiniMax-M3:novita": {
         "id": "MiniMaxAI/MiniMax-M3:novita",
@@ -1012,7 +1110,13 @@
         "capabilities": {
           "structured_output": true
         },
-        "is_pro": true
+        "is_pro": true,
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "deepseek-ai/DeepSeek-V4-Pro:novita": {
         "id": "deepseek-ai/DeepSeek-V4-Pro:novita",
@@ -1033,7 +1137,13 @@
           "structured_output": true
         },
         "is_pro": true,
-        "lightweight_model": "deepseek-ai/DeepSeek-V4-Flash:novita"
+        "lightweight_model": "deepseek-ai/DeepSeek-V4-Flash:novita",
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "moonshotai/Kimi-K3:together": {
         "id": "moonshotai/Kimi-K3:together",
@@ -1053,7 +1163,13 @@
         "context": 1000000,
         "capabilities": {
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       }
     }
   },
@@ -1089,7 +1205,9 @@
         "reasoning_efforts": [
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh",
+          "max"
         ]
       },
       "claude-fable-5": {
@@ -1117,7 +1235,9 @@
         "reasoning_efforts": [
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh",
+          "max"
         ]
       },
       "claude-mythos-5": {
@@ -1145,7 +1265,9 @@
         "reasoning_efforts": [
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh",
+          "max"
         ]
       },
       "claude-fable-5-1": {
@@ -1179,7 +1301,9 @@
         "reasoning_efforts": [
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh",
+          "max"
         ]
       },
       "claude-mythos-5-1": {
@@ -1213,7 +1337,9 @@
         "reasoning_efforts": [
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh",
+          "max"
         ]
       },
       "claude-opus-5": {
@@ -1241,7 +1367,9 @@
         "reasoning_efforts": [
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh",
+          "max"
         ]
       }
     }
@@ -1298,7 +1426,12 @@
         },
         "context": 1000000,
         "max_output_tokens": 384000,
-        "description": "Official release with significantly enhanced agent capabilities for coding and tool use"
+        "description": "Official release with significantly enhanced agent capabilities for coding and tool use",
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ]
       },
       "deepseek-v4-pro": {
         "id": "deepseek-v4-pro",
@@ -1317,7 +1450,12 @@
         "max_output_tokens": 384000,
         "description": "High-performance reasoning model with advanced thinking capabilities",
         "is_pro": true,
-        "lightweight_model": "deepseek-v4-flash"
+        "lightweight_model": "deepseek-v4-flash",
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ]
       },
       "deepseek-v4-flash-vision-exp": {
         "id": "deepseek-v4-flash-vision-exp",
@@ -1336,7 +1474,12 @@
         "context": 1000000,
         "max_output_tokens": 384000,
         "description": "Experimental vision model — image + text input via chat/completions (base64/file_id/URL, 600 images, 48MiB body, 8192px)",
-        "lightweight_model": "deepseek-v4-flash"
+        "lightweight_model": "deepseek-v4-flash",
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ]
       }
     }
   },
@@ -1383,7 +1526,12 @@
           "generation": "5.2",
           "doc_comment": "GLM-5.2 - Z.ai flagship model for long-horizon tasks"
         },
-        "is_pro": true
+        "is_pro": true,
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ]
       },
       "glm-5.3-flash": {
         "id": "glm-5.3-flash",
@@ -1420,7 +1568,12 @@
           "top_tier": true,
           "generation": "5.3",
           "doc_comment": "GLM-5.3 Flash - Z.ai efficient multimodal model with hybrid sparse+linear attention, 320B total / 18B active, 1M context, native vision"
-        }
+        },
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ]
       },
       "glm-5.3": {
         "id": "glm-5.3",
@@ -1438,6 +1591,7 @@
         },
         "context": 1000000,
         "max_output_tokens": 128000,
+        "lightweight_model": "glm-5.2",
         "capabilities": {
           "thinking": true,
           "streaming": true,
@@ -1456,7 +1610,12 @@
           "generation": "5.3",
           "doc_comment": "GLM-5.3 - Z.ai flagship coding model with frontier long-horizon agentic performance"
         },
-        "is_pro": true
+        "is_pro": true,
+        "reasoning_efforts": [
+          "low",
+          "high",
+          "max"
+        ]
       }
     },
     "default_model": "glm-5.3"
@@ -1802,7 +1961,14 @@
           "function_calling": true,
           "structured_output": true,
           "thinking": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
       },
       "muse-spark-1.2": {
         "id": "muse-spark-1.2",
@@ -1830,7 +1996,14 @@
           "thinking": true
         },
         "is_pro": true,
-        "lightweight_model": "muse-spark-1.1"
+        "lightweight_model": "muse-spark-1.1",
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
       },
       "muse-spark-1.2-contributor": {
         "id": "muse-spark-1.2-contributor",
@@ -1856,7 +2029,14 @@
           "function_calling": true,
           "structured_output": true,
           "thinking": true
-        }
+        },
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
       },
       "muse-spark-1.3": {
         "id": "muse-spark-1.3",
@@ -1884,7 +2064,14 @@
           "thinking": true
         },
         "is_pro": true,
-        "lightweight_model": "muse-spark-1.2"
+        "lightweight_model": "muse-spark-1.2",
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
       },
       "muse-spark-1.3-contributor": {
         "id": "muse-spark-1.3-contributor",
@@ -1912,7 +2099,14 @@
           "thinking": true
         },
         "is_pro": true,
-        "lightweight_model": "muse-spark-1.2-contributor"
+        "lightweight_model": "muse-spark-1.2-contributor",
+        "reasoning_efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
       }
     }
   },
@@ -3756,7 +3950,12 @@
           "streaming": true,
           "function_calling": true,
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "deepseek-v4-flash": {
         "id": "deepseek-v4-flash",
@@ -3778,7 +3977,12 @@
           "streaming": true,
           "function_calling": true,
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "doubao-seed-2.0-pro": {
         "id": "doubao-seed-2.0-pro",
@@ -3801,7 +4005,12 @@
           "streaming": true,
           "function_calling": true,
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "MiniMax-M3": {
         "id": "MiniMax-M3",
@@ -3908,7 +4117,12 @@
           "streaming": true,
           "function_calling": true,
           "structured_output": true
-        }
+        },
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high"
+        ]
       }
     }
   },
@@ -3942,6 +4156,56 @@
           "function_calling": true,
           "structured_output": false
         }
+      },
+      "openai/gpt-5.5": {
+        "id": "openai/gpt-5.5",
+        "name": "GPT-5.5 (Merge Gateway)",
+        "description": "OpenAI GPT-5.5 served through Merge Gateway's native Responses API.",
+        "reasoning": true,
+        "tool_call": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "context": 1100000,
+        "output_tokens": 128000,
+        "capabilities": {
+          "streaming": true,
+          "function_calling": true,
+          "structured_output": false
+        },
+        "is_pro": true,
+        "lightweight_model": "openai/gpt-5.6-terra"
+      },
+      "openai/gpt-6-astra": {
+        "id": "openai/gpt-6-astra",
+        "name": "GPT-6 Astra (Merge Gateway)",
+        "description": "OpenAI GPT-6 Astra served through Merge Gateway's native Responses API.",
+        "reasoning": true,
+        "tool_call": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "context": 1050000,
+        "output_tokens": 128000,
+        "capabilities": {
+          "streaming": true,
+          "function_calling": true,
+          "structured_output": false
+        },
+        "is_pro": true,
+        "lightweight_model": "openai/gpt-5.6-sol"
       },
       "anthropic/claude-opus-5": {
         "id": "anthropic/claude-opus-5",
@@ -4518,7 +4782,13 @@
           "structured_output": true
         },
         "is_pro": true,
-        "lightweight_model": "grok-build-0.1"
+        "lightweight_model": "grok-build-0.1",
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
       },
       "grok-4.20-0309-reasoning": {
         "id": "grok-4.20-0309-reasoning",

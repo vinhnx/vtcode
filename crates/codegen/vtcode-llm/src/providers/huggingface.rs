@@ -296,8 +296,9 @@ impl HuggingFaceProvider {
         if let Some(effort) = request.reasoning_effort {
             use crate::rig_adapter::RigProviderCapabilities;
             use vtcode_config::models::Provider;
-            if let Some(reasoning_params) =
-                RigProviderCapabilities::new(Provider::HuggingFace, &request.model).reasoning_parameters(effort)
+            let supported = self.supported_reasoning_efforts(&request.model);
+            if let Some(reasoning_params) = RigProviderCapabilities::new(Provider::HuggingFace, &request.model)
+                .reasoning_parameters_for_supported_efforts(effort, supported)?
             {
                 if let Some(params_obj) = reasoning_params.as_object() {
                     for (k, v) in params_obj {
@@ -799,8 +800,8 @@ impl LLMProvider for HuggingFaceProvider {
         false
     }
 
-    fn effective_context_size(&self, _model: &str) -> usize {
-        128_000
+    fn effective_context_size(&self, model: &str) -> usize {
+        crate::provider::catalog_context_window("huggingface", model, 128_000)
     }
 
     async fn generate(&self, mut request: LLMRequest) -> Result<LLMResponse, LLMError> {

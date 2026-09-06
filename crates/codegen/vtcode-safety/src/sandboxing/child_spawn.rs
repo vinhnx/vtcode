@@ -83,6 +83,12 @@ pub const FILTERED_ENV_VARS: &[&str] = &[
 pub const PRESERVED_ENV_VARS: &[&str] = &[
     // Basic shell environment
     "PATH",
+    "SystemRoot",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "USERPROFILE",
     "HOME",
     "USER",
     "SHELL",
@@ -111,6 +117,15 @@ pub const PRESERVED_ENV_VARS: &[&str] = &[
     "EDITOR",
     "VISUAL",
     "PAGER",
+    "GIT_PAGER",
+    "LESS",
+    "COLUMNS",
+    "LINES",
+    "WORKSPACE_DIR",
+    "CLICOLOR",
+    "CLICOLOR_FORCE",
+    "LS_COLORS",
+    "CARGO_TERM_COLOR",
     // Build tool paths
     "CARGO_HOME",
     "RUSTUP_HOME",
@@ -157,7 +172,13 @@ pub fn build_sanitized_env(
 
     // Copy only preserved environment variables
     for key in PRESERVED_ENV_VARS {
-        if let Some(value) = current_env.get(*key) {
+        let value = current_env.get(*key).or_else(|| {
+            cfg!(windows)
+                .then(|| current_env.iter().find(|(name, _)| name.eq_ignore_ascii_case(key)))
+                .flatten()
+                .map(|(_, value)| value)
+        });
+        if let Some(value) = value {
             sanitized.insert(key.to_string(), value.clone());
         }
     }

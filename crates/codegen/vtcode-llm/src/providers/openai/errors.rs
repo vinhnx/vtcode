@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use crate::providers::common::extract_header;
 use vtcode_config::constants::models;
+use vtcode_config::models::model_catalog_entry;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct OpenAIErrorDetails {
@@ -70,10 +71,17 @@ pub(crate) fn is_model_not_found(status: StatusCode, error_text: &str) -> bool {
 
 /// Provide a fallback model when the requested model is unavailable.
 pub(crate) fn fallback_model_if_not_found(model: &str) -> Option<String> {
+    if let Some(entry) = model_catalog_entry("openai", model) {
+        return entry
+            .lightweight_model
+            .filter(|candidate| *candidate != model)
+            .map(str::to_owned);
+    }
+
     match model {
         m if m == models::openai::GPT_5_MINI => Some(models::openai::GPT_5.to_string()),
         m if m == models::openai::GPT_5_NANO => Some(models::openai::GPT_5_MINI.to_string()),
-        _ => Some(models::openai::DEFAULT_MODEL.to_string()),
+        _ => None,
     }
 }
 

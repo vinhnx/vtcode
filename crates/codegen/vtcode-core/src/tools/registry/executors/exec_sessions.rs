@@ -44,11 +44,12 @@ impl ToolRegistry {
             .await?;
         let mut session_env = HashMap::new();
         let mut zsh_exec_bridge = None;
+        let mut trusted_bridge_env = HashMap::new();
         if self.pty_config().shell_zsh_fork {
             let wrapper_executable =
                 std::env::current_exe().context("resolve current executable for zsh exec bridge")?;
             let bridge = ZshExecBridgeSession::spawn(request.confirm).context("initialize zsh exec bridge session")?;
-            session_env = bridge.env_vars(&wrapper_executable);
+            trusted_bridge_env = bridge.env_vars(&wrapper_executable);
             zsh_exec_bridge = Some(bridge);
         }
         session_env.extend(request.env_overrides);
@@ -66,6 +67,7 @@ impl ToolRegistry {
                 },
                 session_env,
                 zsh_exec_bridge,
+                trusted_bridge_env,
                 request.sandbox_active,
             )
             .await
@@ -287,7 +289,7 @@ impl ToolRegistry {
 
         let (content, spool_truncated) = if let Some(spool_path) = source_spool_path.as_deref() {
             let resolved = resolve_workspace_scoped_path_resolved(self.inventory.workspace_root(), spool_path).await?;
-            read_bounded_spool_file(&resolved, EXEC_INSPECT_SPOOL_MAX_BYTES).await?
+            read_bounded_spool_file(self.inventory.workspace_root(), &resolved, EXEC_INSPECT_SPOOL_MAX_BYTES).await?
         } else if let Some(session_id) = source_session_id.as_deref() {
             let session_id = validate_exec_session_id(session_id, "inspect")?;
             let yield_time_ms = clamp_peek_yield_ms(payload.get("yield_time_ms").and_then(Value::as_u64));

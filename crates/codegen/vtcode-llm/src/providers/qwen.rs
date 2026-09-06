@@ -95,10 +95,14 @@ impl_openai_compat_provider!(QwenProvider, QwenSpec, {
         } else {
             model
         };
-        match requested {
-            models::qwen::DEEPSEEK_V4_FLASH | models::qwen::DEEPSEEK_V4_PRO => 1_048_576,
-            _ => 131_072,
-        }
+        crate::provider::catalog_context_window(
+            "qwen",
+            requested,
+            match requested {
+                models::qwen::DEEPSEEK_V4_FLASH | models::qwen::DEEPSEEK_V4_PRO => 1_048_576,
+                _ => 131_072,
+            },
+        )
     }
 });
 

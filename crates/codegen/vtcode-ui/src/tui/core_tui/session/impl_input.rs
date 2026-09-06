@@ -107,31 +107,13 @@ impl Session {
             }
             InlineCommand::SetActivityState(state) => {
                 self.activity_state = state;
-                if state.is_busy() {
-                    self.input_status_left = state.status().map(ToOwned::to_owned);
-                    self.input_enabled = false;
-                    self.cursor_visible = false;
-                } else if state.is_stage() {
-                    // Stage states (Planning/Building) keep input enabled so the
-                    // user can still steer between turns. The stage text is
-                    // replaced by a running-tool status during tool execution,
-                    // which also drives the footer spinner.
-                    self.input_status_left = state.status().map(ToOwned::to_owned);
-                    self.input_enabled = true;
-                    self.cursor_visible = true;
-                } else if matches!(state, ActivityState::Blocked) {
-                    // Blocked keeps input enabled; persist its status so direct
-                    // left-status readers (terminal title, input status line)
-                    // surface the blocked state instead of relying on the
-                    // status_left_text activity-state fallback.
-                    self.input_status_left = state.status().map(ToOwned::to_owned);
-                    self.input_enabled = true;
-                    self.cursor_visible = true;
-                } else {
-                    self.input_status_left = None;
-                    self.input_enabled = true;
-                    self.cursor_visible = true;
+                self.input_status_left = state.status().map(ToOwned::to_owned);
+                let enabled = !state.is_busy();
+                self.set_input_enabled(enabled);
+                if let Some(ActiveOverlay::Modal(overlay)) = self.active_overlay.as_mut() {
+                    overlay.restore_cursor = enabled;
                 }
+                self.cursor_visible = enabled && !self.has_active_overlay();
                 self.needs_redraw = true;
             }
             InlineCommand::SetTerminalTitleItems { items } => {
@@ -203,7 +185,7 @@ impl Session {
                 self.cursor_visible = value;
             }
             InlineCommand::SetInputEnabled(value) => {
-                self.input_enabled = value;
+                self.set_input_enabled(value);
             }
             InlineCommand::SetImageInputEnabled(value) => {
                 self.image_input_enabled = value;

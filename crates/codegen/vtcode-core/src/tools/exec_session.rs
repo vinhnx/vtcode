@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use vtcode_bash_runner::{PipeSpawnOptions, ProcessHandle, spawn_pipe_process_with_options};
 
-use crate::sandboxing::filter_sensitive_env;
+use crate::sandboxing::build_sanitized_env;
 use crate::tools::ExecSessionId;
 use crate::tools::pty::PtySize;
 use crate::tools::registry::{PtySessionGuard, PtySessionManager};
@@ -500,7 +500,7 @@ impl ExecSessionManager {
     ) -> Result<VTCodeExecSession> {
         self.ensure_session_absent(&session_id).await?;
         let env = if sandbox_active {
-            filter_sensitive_env(&env)
+            build_sanitized_env(&env, true, false, "exec-session", &[])
         } else {
             env
         };
@@ -518,8 +518,17 @@ impl ExecSessionManager {
         extra_env: HashMap<String, String>,
         zsh_exec_bridge: Option<ZshExecBridgeSession>,
     ) -> Result<VTCodeExecSession> {
-        self.create_pty_session_with_sandbox(session_id, command, working_dir, size, extra_env, zsh_exec_bridge, false)
-            .await
+        self.create_pty_session_with_sandbox(
+            session_id,
+            command,
+            working_dir,
+            size,
+            extra_env,
+            zsh_exec_bridge,
+            HashMap::new(),
+            false,
+        )
+        .await
     }
 
     pub(crate) async fn create_pty_session_with_sandbox(
@@ -530,6 +539,7 @@ impl ExecSessionManager {
         size: PtySize,
         extra_env: HashMap<String, String>,
         zsh_exec_bridge: Option<ZshExecBridgeSession>,
+        trusted_env: HashMap<String, String>,
         sandbox_active: bool,
     ) -> Result<VTCodeExecSession> {
         self.ensure_session_absent(&session_id).await?;
@@ -541,6 +551,7 @@ impl ExecSessionManager {
             size,
             extra_env,
             zsh_exec_bridge,
+            trusted_env,
             sandbox_active,
         )?;
         let exec_metadata = VTCodeExecSession::from(metadata);

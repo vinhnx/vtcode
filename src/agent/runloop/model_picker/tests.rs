@@ -521,6 +521,19 @@ fn selection_omits_openai_service_tier_support_for_gpt_oss() {
 }
 
 #[test]
+fn picker_separates_openrouter_reasoning_from_effort_support() {
+    let option = MODEL_OPTIONS
+        .iter()
+        .find(|option| option.id == "meta/muse-spark-1.2")
+        .expect("OpenRouter Muse Spark route should exist");
+    let detail = selection_from_option(option);
+
+    assert!(detail.reasoning_supported);
+    assert!(!detail.reasoning_effort_supported);
+    assert!(detail.reasoning_effort_levels().is_empty());
+}
+
+#[test]
 fn openai_codex_reasoning_helpers_match_supported_variants() {
     assert!(!supports_gpt5_none_reasoning("gpt"));
     assert!(supports_gpt5_none_reasoning("gpt-5.6-sol"));
@@ -529,11 +542,13 @@ fn openai_codex_reasoning_helpers_match_supported_variants() {
     assert!(supports_gpt5_none_reasoning("gpt-5-codex"));
     assert!(!supports_gpt5_none_reasoning("gpt-5.1-codex"));
 
-    assert!(!supports_xhigh_reasoning("gpt"));
+    // The rolling GPT alias inherits its supported effort levels from the
+    // generated catalog metadata.
+    assert!(supports_xhigh_reasoning("gpt"));
     assert!(supports_xhigh_reasoning("gpt-5.6-sol"));
-    assert!(supports_xhigh_reasoning("gpt-5.5-2026-04-23"));
+    assert!(!supports_xhigh_reasoning("gpt-5.5-2026-04-23"));
     assert!(supports_xhigh_reasoning("gpt-5.6"));
-    assert!(supports_xhigh_reasoning("gpt-5.2-codex"));
+    assert!(!supports_xhigh_reasoning("gpt-5.2-codex"));
     assert!(supports_xhigh_reasoning("gpt-5-codex"));
     assert!(!supports_xhigh_reasoning("gpt-5.1-codex"));
     assert!(!supports_xhigh_reasoning("gpt-5.1-codex-max"));
@@ -556,10 +571,11 @@ fn build_result_uses_selected_service_tier() {
         provider_label: "OpenAI".to_string(),
         provider_enum: Some(Provider::OpenAI),
         model_id: "gpt-5.6-sol".to_string(),
-        model_display: "GPT-5.4".to_string(),
+        model_display: "GPT-5.6 Sol".to_string(),
         known_model: true,
         context_window: None,
         reasoning_supported: true,
+        reasoning_effort_supported: true,
         reasoning_optional: false,
         reasoning_off_model: None,
         service_tier_supported: true,
@@ -585,10 +601,11 @@ fn build_result_uses_selected_flex_service_tier() {
         provider_label: "OpenAI".to_string(),
         provider_enum: Some(Provider::OpenAI),
         model_id: "gpt-5.6-sol".to_string(),
-        model_display: "GPT-5.4".to_string(),
+        model_display: "GPT-5.6 Sol".to_string(),
         known_model: true,
         context_window: None,
         reasoning_supported: true,
+        reasoning_effort_supported: true,
         reasoning_optional: false,
         reasoning_off_model: None,
         service_tier_supported: true,
@@ -606,6 +623,35 @@ fn build_result_uses_selected_flex_service_tier() {
     assert!(result.service_tier_changed);
 }
 
+#[test]
+fn build_result_clears_inherited_reasoning_for_structured_only_route() {
+    let mut picker = base_picker_state("openrouter", "meta/muse-spark-1.2");
+    picker.selection = Some(SelectionDetail {
+        provider_key: "openrouter".to_string(),
+        provider_label: "OpenRouter".to_string(),
+        provider_enum: Some(Provider::OpenRouter),
+        model_id: "meta/muse-spark-1.2".to_string(),
+        model_display: "Muse Spark 1.2".to_string(),
+        known_model: true,
+        context_window: Some(1_048_576),
+        reasoning_supported: true,
+        reasoning_effort_supported: false,
+        reasoning_optional: false,
+        reasoning_off_model: None,
+        service_tier_supported: false,
+        requires_api_key: false,
+        uses_chatgpt_auth: false,
+        env_key: "OPENROUTER_API_KEY".to_string(),
+        mimo_auth_method: None,
+    });
+    picker.selected_reasoning = Some(ReasoningEffortLevel::High);
+
+    let result = picker.build_result().expect("result should build");
+
+    assert_eq!(result.reasoning, ReasoningEffortLevel::None);
+    assert!(result.reasoning_changed);
+}
+
 #[tokio::test]
 async fn openai_login_stays_in_picker_when_ctrl_c_cancels_auth() {
     let mut picker = base_picker_state("openai", "gpt-5.6-sol");
@@ -614,10 +660,11 @@ async fn openai_login_stays_in_picker_when_ctrl_c_cancels_auth() {
         provider_label: "OpenAI".to_string(),
         provider_enum: Some(Provider::OpenAI),
         model_id: "gpt-5.6-sol".to_string(),
-        model_display: "GPT-5.4".to_string(),
+        model_display: "GPT-5.6 Sol".to_string(),
         known_model: true,
         context_window: None,
         reasoning_supported: true,
+        reasoning_effort_supported: true,
         reasoning_optional: false,
         reasoning_off_model: None,
         service_tier_supported: true,

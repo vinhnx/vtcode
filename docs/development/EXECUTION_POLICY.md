@@ -187,3 +187,41 @@ Run them with:
 cargo nextest run -p vtcode-core emitted_model_tool_schema_fits_within_first_request_budget
 cargo nextest run -p vtcode-core -E 'test(session_tool_catalog)'
 ```
+
+### Model pricing and fallback policy
+
+`vtcode-llm::usage_cost` owns normalized provider usage and the shared cost calculation.
+Raw cost prices all input tokens at the input rate and is used for USD budget enforcement;
+cache-aware effective cost is for display. Each turn is priced under the route that
+served it and added to the session total; switching to a cheaper model never reprices
+earlier spend. A turn without usage or pricing leaves the complete total unknown. Cache creation can make effective cost higher
+than raw cost. Missing, negative, or non-finite pricing is not a zero-price estimate.
+A configured USD budget blocks an unpriced route before inference or automatic compaction,
+with a `turn.blocked` diagnostic and recoverable failed outcome. Explicitly removing the
+USD budget permits an unpriced route; the reported cost remains unknown.
+
+Model capability tier and lightweight fallback come from `docs/models.json` fields
+`is_pro` and `lightweight_model`. Fallback stays within the selected provider and never
+returns the same model. Missing metadata gives no tier assertion or speculative fallback.
+Legacy built-in variants without matching catalog rows currently include
+`CopilotGPT52Codex`, `CopilotGPT54`, `CopilotClaudeSonnet46`, `EvolinkDeepseekV4Pro`,
+`MoonshotKimiK3`, `MoonshotKimiK27Code`, `PoolsideLagunaM1`, and `PoolsideLagunaS21`.
+These need explicit catalog metadata before they can participate in automatic fallback.
+Pricing is route-specific: OpenAI and OpenRouter Astra catalog routes are priced;
+Merge Gateway's Astra route currently has no pricing and therefore blocks with a USD cap.
+
+Deterministic cross-family normalization and route-pricing checks run without paid calls:
+`cargo nextest run -p vtcode-llm -E 'test(usage_cost)'`.
+
+### Terminal input and redraw ownership
+
+The core TUI derives a single input owner: overlay, composer, or runtime. Activity
+changes while an overlay is open update the state restored on close; busy runtime
+states cannot accidentally re-enable the composer. Transcript cache validity is
+explicit, so revision zero and resize invalidation remain distinct.
+
+Terminal redraw ticks coalesce to one pending notification. Keyboard events remain
+ordered and PTY data continues through its existing ordered command channel; redraw
+coalescing never drops output bytes. Built-in theme checks cover every semantic
+foreground against its background at WCAG AA 4.5:1, including inherited tool output.
+Reasoning uses italics without terminal dimming, whose contrast varies by terminal.

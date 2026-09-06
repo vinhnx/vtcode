@@ -20,7 +20,7 @@
 ## Gotchas
 
 - `BashRunner::new()` canonicalizes root — bails if missing.
-- `path_cache` is LRU (256) — no fresh canonicalize every call.
+- Authorization resolves paths freshly; never cache symlink targets across operations. OS sandboxing or bound filesystem handles remain necessary against concurrent replacement.
 - Unsafe env mutation (`set_var`/`remove_var`) is centralized in `vtcode-commons::env_lock`, serialized by a process-wide mutex, single-threaded startup only.
 - `policy` containment delegates to `vtcode_commons::paths::ensure_path_within_workspace` — `..`-traversal paths are rejected (intentionally stricter than the old `starts_with`).
 - Pipe spooling opts into `SpawnedProcess::reliable_output_rx`, a bounded lossless stream; legacy broadcast subscribers must remain independent of that backpressure path.

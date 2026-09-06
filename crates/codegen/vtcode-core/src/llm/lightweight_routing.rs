@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
+use std::str::FromStr;
 
 use crate::config::api_keys::{ApiKeySources, get_api_key_with_mode};
 use crate::config::constants::model_helpers;
 use crate::config::loader::VTCodeConfig;
-use crate::config::models::{ModelId, Provider};
+use crate::config::models::{ModelId, Provider, model_catalog_entry};
 use crate::config::types::AgentConfig as RuntimeAgentConfig;
 use crate::llm::factory::{ProviderConfig, create_provider_with_config, infer_provider_from_model};
 use crate::llm::provider::LLMProvider;
@@ -178,26 +179,27 @@ pub fn main_model_route(runtime_config: &RuntimeAgentConfig) -> ModelRoute {
 /// to provider defaults.
 pub fn auto_lightweight_model(provider_name: &str, active_model: &str) -> String {
     let trimmed_model = active_model.trim();
-    let provider = resolve_provider_for_model(provider_name, trimmed_model);
+    let Some(provider) = known_provider_from_name(provider_name).or_else(|| infer_provider_from_model(trimmed_model))
+    else {
+        // A custom endpoint without catalog metadata cannot safely receive a
+        // built-in provider's fallback model. Keep its active model on the
+        // route until the endpoint declares lightweight metadata.
+        return trimmed_model.to_string();
+    };
 
-    if let Ok(model_id) = trimmed_model.parse::<ModelId>() {
-        if model_id.is_efficient_variant() {
-            return model_id.as_str().to_string();
-        }
-
-        if let Some(lightweight_model) = model_id.preferred_lightweight_variant() {
-            return lightweight_model.as_str().to_string();
-        }
-    }
-
-    if let Some(lightweight_model) = preferred_lightweight_model_slug(provider, trimmed_model) {
+    if let Some(lightweight_model) = catalog_lightweight_model(provider, trimmed_model) {
         return lightweight_model;
     }
 
-    provider_default_lightweight_model(provider)
-        .map(|cow| cow.into_owned())
-        .or_else(|| model_helpers::default_for(provider_name).map(|s| s.to_string()))
-        .unwrap_or_else(|| trimmed_model.to_string())
+    if trimmed_model.is_empty() {
+        return provider_default_lightweight_model(provider)
+            .map(str::to_string)
+            .unwrap_or_default();
+    }
+
+    // An unmapped model may be a user-managed endpoint. Never replace it with
+    // an unrelated provider default just because the provider is known.
+    trimmed_model.to_string()
 }
 
 /// Return the list of available lightweight model choices for the given provider.
@@ -215,7 +217,9 @@ pub fn lightweight_model_choices(provider_name: &str, active_model: &str) -> Vec
         choices.push(active_model.trim().to_string());
     }
 
-    if let Some(models) = model_helpers::supported_for(provider.as_ref()) {
+    if let Some(provider) = provider
+        && let Some(models) = model_helpers::supported_for(provider.as_ref())
+    {
         for model in models {
             let include = model
                 .parse::<ModelId>()
@@ -337,143 +341,57 @@ fn route_for_candidate(
     })
 }
 
-fn provider_from_name(provider_name: &str) -> Provider {
-    known_provider_from_name(provider_name).unwrap_or(Provider::Gemini)
-}
-
-fn resolve_provider_for_model(provider_name: &str, active_model: &str) -> Provider {
-    known_provider_from_name(provider_name)
-        .or_else(|| infer_provider_from_model(active_model))
-        .unwrap_or_else(|| provider_from_name(provider_name))
+fn resolve_provider_for_model(provider_name: &str, active_model: &str) -> Option<Provider> {
+    known_provider_from_name(provider_name).or_else(|| infer_provider_from_model(active_model))
 }
 
 fn known_provider_from_name(provider_name: &str) -> Option<Provider> {
-    match provider_name.to_ascii_lowercase().as_str() {
-        "openai" => Some(Provider::OpenAI),
-        "anthropic" => Some(Provider::Anthropic),
-        "copilot" => Some(Provider::Copilot),
-        "deepseek" => Some(Provider::DeepSeek),
-        "meta" | "meta-ai" => Some(Provider::Meta),
-        "gemini" | "google" => Some(Provider::Gemini),
-        "openrouter" => Some(Provider::OpenRouter),
-        "ollama" => Some(Provider::Ollama),
-        "lmstudio" => Some(Provider::LmStudio),
-        "llamacpp" | "llama.cpp" | "llama-cpp" => Some(Provider::LlamaCpp),
-        "moonshot" => Some(Provider::Moonshot),
-        "zai" => Some(Provider::ZAI),
-        "minimax" => Some(Provider::Minimax),
-        "huggingface" => Some(Provider::HuggingFace),
-        "stepfun" => Some(Provider::StepFun),
-        "evolink" => Some(Provider::Evolink),
-        "nvidia" | "nvidia-nim" => Some(Provider::NVIDIA),
-        "merge-gateway" | "merge_gateway" | "mergegateway" => Some(Provider::MergeGateway),
-        "vercel" | "vercel-ai-gateway" | "ai-gateway" => Some(Provider::Vercel),
-        _ => None,
-    }
+    Provider::from_str(provider_name.trim()).ok()
 }
 
-fn preferred_lightweight_model_slug(provider: Provider, active_model: &str) -> Option<String> {
-    let trimmed_model = active_model.trim();
-    let lower = trimmed_model.to_ascii_lowercase();
-
-    match provider {
-        Provider::Anthropic => {
-            if lower.contains("haiku") {
-                return Some(ModelId::ClaudeSonnet5.as_str().to_string());
-            }
-            if lower.contains("sonnet") || lower.contains("opus") {
-                return Some(ModelId::ClaudeSonnet5.as_str().to_string());
-            }
-            None
-        }
-        Provider::OpenAI => {
-            if lower.contains("gpt-5.6-luna") || lower.contains("gpt-5.6-luna") {
-                return Some(trimmed_model.to_string());
-            }
-            if lower.contains("gpt-5.6-sol") {
-                return Some(ModelId::GPT56Luna.as_str().to_string());
-            }
-            if lower.contains("gpt-5-mini") || lower.contains("gpt-5-nano") {
-                return Some(trimmed_model.to_string());
-            }
-            if lower.contains("gpt-5.") || lower == "gpt-5" || lower.contains("gpt-5-codex") {
-                return Some(ModelId::GPT56Luna.as_str().to_string());
-            }
-            None
-        }
-        Provider::Copilot => {
-            if lower.contains("gpt-5.6-luna") {
-                return Some(trimmed_model.to_string());
-            }
-            if lower.contains("gpt-5") || lower.contains("claude") {
-                return Some(ModelId::CopilotGPT54Mini.as_str().to_string());
-            }
-            None
-        }
-        Provider::DeepSeek => {
-            if lower.contains("flash") || lower.contains("chat") {
-                return Some(trimmed_model.to_string());
-            }
-            if lower.contains("pro") || lower.contains("reasoner") {
-                return Some(trimmed_model.to_string());
-            }
-            None
-        }
-        Provider::Meta => {
-            if lower == "muse-spark-1.2" {
-                Some(ModelId::MetaMuseSpark11.as_str().to_string())
-            } else {
-                Some(trimmed_model.to_string())
-            }
-        }
-        Provider::Gemini => {
-            if lower.contains("flash-lite") || lower.contains("flash preview") {
-                return Some(trimmed_model.to_string());
-            }
-            if lower.contains("3.1") {
-                return Some(ModelId::Gemini37Flash.as_str().to_string());
-            }
-            if lower.contains("gemini-3") || lower.contains("gemini 3") {
-                return Some(ModelId::Gemini37Flash.as_str().to_string());
-            }
-            None
-        }
-        Provider::ZAI => {
-            if lower.contains("glm-5.1") {
-                return Some(ModelId::ZaiGlm52.as_str().to_string());
-            }
-            None
-        }
-        Provider::Minimax => {
-            if lower.contains("m2.7") {
-                return Some(ModelId::MinimaxM3.as_str().to_string());
-            }
-            None
-        }
-        Provider::StepFun => Some(trimmed_model.to_string()),
-        Provider::Evolink => Some(trimmed_model.to_string()),
-        Provider::NVIDIA => Some(trimmed_model.to_string()),
-        Provider::MergeGateway => Some(trimmed_model.to_string()),
-        _ => None,
-    }
+fn provider_default_lightweight_model(provider: Provider) -> Option<&'static str> {
+    let provider_name = provider.as_ref();
+    let default_model = model_helpers::default_for(provider_name)?;
+    let catalog_lightweight = model_catalog_entry(provider_name, default_model)
+        .and_then(|entry| entry.lightweight_model)
+        .filter(|model| !model.trim().is_empty());
+    Some(catalog_lightweight.unwrap_or(default_model))
 }
 
-fn provider_default_lightweight_model(provider: Provider) -> Option<std::borrow::Cow<'static, str>> {
-    match provider {
-        Provider::OpenAI => Some(ModelId::GPT56Luna.as_str()),
-        Provider::Anthropic => Some(ModelId::ClaudeSonnet5.as_str()),
-        Provider::Copilot => Some(ModelId::CopilotGPT54Mini.as_str()),
-        Provider::DeepSeek => Some(ModelId::DeepSeekV4Flash.as_str()),
-        Provider::Meta => Some(ModelId::MetaMuseSpark11.as_str()),
-        Provider::Gemini => Some(ModelId::Gemini37Flash.as_str()),
-        Provider::ZAI => Some(ModelId::ZaiGlm52.as_str()),
-        Provider::Minimax => Some(ModelId::MinimaxM3.as_str()),
-        Provider::StepFun => Some(ModelId::StepFun37Flash.as_str()),
-        Provider::Evolink => Some(ModelId::EvolinkGpt52.as_str()),
-        Provider::NVIDIA => Some(ModelId::NvidiaNemotron3Nano30bA3b.as_str()),
-        Provider::MergeGateway => Some(ModelId::MergeGatewayDefaultRouting.as_str()),
-        _ => None,
+/// Resolve the catalog-backed lightweight sibling for a provider/model pair.
+///
+/// `ModelId` and generated catalog entries are two views of the same catalog;
+/// keeping their precedence in one helper prevents the automatic route and
+/// provider-default route from drifting apart.
+fn catalog_lightweight_model(provider: Provider, active_model: &str) -> Option<String> {
+    if let Some(entry) = model_catalog_entry(provider.as_ref(), active_model)
+        && let Some(target) = entry.lightweight_model
+        && !target.trim().is_empty()
+    {
+        return Some(normalize_catalog_target(provider, target));
     }
+
+    if let Ok(model_id) = active_model.parse::<ModelId>() {
+        if model_id.provider() != provider {
+            return None;
+        }
+        if model_id.is_efficient_variant() {
+            return Some(model_id.as_str().to_string());
+        }
+        if let Some(lightweight_model) = model_id.preferred_lightweight_variant() {
+            return Some(lightweight_model.as_str().to_string());
+        }
+    }
+
+    None
+}
+
+fn normalize_catalog_target(provider: Provider, target: &str) -> String {
+    let target = target.trim();
+    if provider == Provider::Evolink && !target.contains('/') {
+        return format!("evolink/{target}");
+    }
+    target.to_string()
 }
 
 #[cfg(test)]
@@ -600,12 +518,12 @@ mod tests {
     }
 
     #[test]
-    fn auto_lightweight_model_uses_closest_anthropic_haiku_pair() {
+    fn auto_lightweight_model_uses_catalog_anthropic_pair() {
         assert_eq!(
             auto_lightweight_model("anthropic", &ModelId::ClaudeSonnet5.as_str()),
             ModelId::ClaudeSonnet5.as_str()
         );
-        assert_eq!(auto_lightweight_model("anthropic", "claude-sonnet-4.5"), ModelId::ClaudeSonnet5.as_str());
+        assert_eq!(auto_lightweight_model("anthropic", "claude-sonnet-4.5"), "claude-sonnet-4.5");
     }
 
     #[test]
@@ -621,6 +539,26 @@ mod tests {
     #[test]
     fn auto_lightweight_model_infers_family_for_custom_provider() {
         assert_eq!(auto_lightweight_model("mycorp", &ModelId::GPT56Sol.as_str()), ModelId::GPT56Terra.as_str());
+    }
+
+    #[test]
+    fn auto_lightweight_model_keeps_unmapped_custom_route() {
+        assert_eq!(auto_lightweight_model("mycorp", "custom-model-v1"), "custom-model-v1");
+    }
+
+    #[test]
+    fn auto_lightweight_model_keeps_unmapped_model_for_known_provider() {
+        assert_eq!(auto_lightweight_model("openai", "custom-model-v1"), "custom-model-v1");
+    }
+
+    #[test]
+    fn auto_lightweight_model_keeps_unmapped_evolink_route() {
+        assert_eq!(auto_lightweight_model("evolink", "evolink/deepseek-v4-pro"), "evolink/deepseek-v4-pro");
+    }
+
+    #[test]
+    fn lightweight_model_choices_do_not_invent_provider_for_unknown_route() {
+        assert_eq!(lightweight_model_choices("mycorp", "custom-model-v1"), vec!["custom-model-v1"]);
     }
 
     #[test]

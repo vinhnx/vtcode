@@ -250,7 +250,7 @@ impl ThemePalette {
             output: Self::style_from(text, false, bold_is_bright),
             response: Self::style_from(ctx.compute_response_color(text), false, bold_is_bright),
             reasoning: Self::style_from(ctx.compute_reasoning_color(text), false, bold_is_bright)
-                .effects(Effects::DIMMED | Effects::ITALIC),
+                .effects(Effects::ITALIC),
             tool: Style::new().fg_color(Some(Color::Rgb(ctx.compute_tool_color(text)))),
             tool_detail: Style::new().fg_color(Some(Color::Rgb(tool_body))),
             tool_output: Style::new(),

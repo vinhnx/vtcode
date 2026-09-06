@@ -379,7 +379,7 @@ fn spawn_clipboard_command(mut cmd: std::process::Command, text: &str) -> bool {
     const POLL_INTERVAL: Duration = Duration::from_millis(10);
     // After the helper exits, its writer report is usually already delivered;
     // this grace window only covers the rare in-flight race.
-    const WRITE_REPORT_GRACE: Duration = Duration::from_millis(25);
+    const WRITE_REPORT_GRACE: Duration = Duration::from_millis(100);
 
     let program = cmd.get_program().to_string_lossy().into_owned();
     let Ok(mut child) = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
@@ -404,10 +404,12 @@ fn spawn_clipboard_command(mut cmd: std::process::Command, text: &str) -> bool {
     // Tracks the first observed write failure; None until the writer reports or
     // a status/deadline path makes a decision.
     let mut write_error = None;
+    let mut write_complete = false;
     let deadline = Instant::now() + WAIT_BUDGET;
     loop {
         if let Ok(report) = write_rx.try_recv() {
             write_error = report;
+            write_complete = true;
         }
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -415,9 +417,12 @@ fn spawn_clipboard_command(mut cmd: std::process::Command, text: &str) -> bool {
                 // give its report a short grace window, otherwise a write
                 // failing concurrently with a clean exit would count as ok.
                 let flush_deadline = Instant::now() + WRITE_REPORT_GRACE;
-                while write_error.is_none() {
+                while !write_complete {
                     match write_rx.try_recv() {
-                        Ok(report) => write_error = report,
+                        Ok(report) => {
+                            write_error = report;
+                            write_complete = true;
+                        }
                         Err(std::sync::mpsc::TryRecvError::Empty) => {
                             if Instant::now() >= flush_deadline {
                                 break;

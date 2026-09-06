@@ -54,12 +54,26 @@ impl SessionRequestEnvelope {
     pub fn new(
         segment_id: impl Into<Arc<str>>,
         system_prompt: impl Into<Arc<str>>,
+        tools: Vec<ToolDefinition>,
+        instruction_digest: u64,
+    ) -> Self {
+        let system_prompt = system_prompt.into();
+        let prefix_hash = hash_value(&system_prompt);
+        Self::with_prefix_hash(segment_id, system_prompt, tools, instruction_digest, prefix_hash)
+    }
+
+    /// Freeze a segment prefix while retaining a caller-provided instruction
+    /// digest for compatibility with request identity tracking.
+    #[must_use]
+    pub fn with_prefix_hash(
+        segment_id: impl Into<Arc<str>>,
+        system_prompt: impl Into<Arc<str>>,
         mut tools: Vec<ToolDefinition>,
         instruction_digest: u64,
+        prefix_hash: u64,
     ) -> Self {
         tools.sort_by(compare_tools);
         let system_prompt = system_prompt.into();
-        let prefix_hash = hash_value(&system_prompt);
         let catalog_hash = if tools.is_empty() {
             None
         } else {
@@ -185,5 +199,16 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, ["exec_command", "search_tools", "apply_patch", "alpha"]);
+    }
+
+    #[test]
+    fn constructor_preserves_instruction_digest_and_prefix_override() {
+        let envelope = SessionRequestEnvelope::new("segment-1", "fixed prompt", vec![], 42);
+        assert_eq!(envelope.instruction_digest(), 42);
+        assert_eq!(envelope.prefix_hash(), hash_value(&"fixed prompt"));
+
+        let stable = SessionRequestEnvelope::with_prefix_hash("segment-1", "runtime prompt", vec![], 42, 7);
+        assert_eq!(stable.instruction_digest(), 42);
+        assert_eq!(stable.prefix_hash(), 7);
     }
 }

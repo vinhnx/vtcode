@@ -690,6 +690,7 @@ pub(super) fn preflight_validate_resolved_call(
 
 #[cfg(test)]
 mod tests {
+    use super::super::ToolExecutionRequest;
     use super::super::assembly::public_tool_name_candidates;
     use super::{
         ToolRegistry, coerce_string_to_schema_type_in_place, configured_file_operation_max_payload_bytes,
@@ -1194,6 +1195,22 @@ mod tests {
                 .is_some_and(|text| text.contains("without sandbox restrictions"))
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn direct_unsandboxed_exec_requires_operator_preapproval() {
+        let (_temp, registry) = new_test_registry().await;
+        let args = json!({
+            "cmd": "printf guarded",
+            "sandbox_permissions": "require_escalated",
+            "justification": "Need unsandboxed access for this check."
+        });
+
+        let outcome = registry
+            .execute_public_tool_request(ToolExecutionRequest::new(tool_names::EXEC_COMMAND, args))
+            .await;
+        let error = outcome.error.expect("direct escalation must be rejected");
+        assert!(error.message.contains("requires an enforced operator approval decision"));
     }
 
     #[tokio::test]

@@ -311,13 +311,25 @@ pub(super) async fn resolve_workspace_scoped_path_resolved(workspace_root: &Path
 /// bytes only. Prevents an agent-supplied `spool_path` (which may point at a
 /// multi-GB generated/minified file) from materializing entirely in memory.
 /// Returns `(content, truncated)`.
-pub(super) async fn read_bounded_spool_file(path: &Path, cap: usize) -> Result<(String, bool)> {
+pub(super) async fn read_bounded_spool_file(workspace_root: &Path, path: &Path, cap: usize) -> Result<(String, bool)> {
     use tokio::io::AsyncReadExt;
 
-    let mut bytes = Vec::with_capacity(cap.min(64 * 1024));
-    tokio::fs::File::open(path)
+    let relative = path
+        .strip_prefix(workspace_root)
+        .context("spool path must remain beneath workspace")?
+        .to_path_buf();
+    anyhow::ensure!(
+        relative.starts_with(".vtcode/context/tool_outputs"),
+        "inspect requires a workspace tool-output spool"
+    );
+    let root = workspace_root.to_path_buf();
+    let file = tokio::task::spawn_blocking(move || vtcode_commons::fs::bound_file::open_file_beneath(&root, &relative))
         .await
-        .with_context(|| format!("Failed to open spool path: {}", path.display()))?
+        .context("spool open task failed")?
+        .with_context(|| format!("failed to securely open spool: {}", path.display()))?;
+
+    let mut bytes = Vec::with_capacity(cap.min(64 * 1024));
+    tokio::fs::File::from_std(file)
         .take((cap as u64).saturating_add(1))
         .read_to_end(&mut bytes)
         .await

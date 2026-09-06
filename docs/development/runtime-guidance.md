@@ -51,17 +51,28 @@ the fingerprint where the transport supports explicit keys. Local fingerprint
 reuse is not proof of a provider cache hit: use returned usage cache-hit metrics
 to measure that separately for each provider.
 
+Tool documentation density is resolved separately from tool authorization. Both
+request paths use Minimal guidance at 32,000 context tokens or below, or when the
+Default prompt exceeds the configured system-prompt token or monetary budget;
+otherwise they retain Default guidance. Missing pricing does not imply cheap
+execution. Parallel-call hints require the active provider's parallel-tool
+capability. Both profiles preserve inspection, verification, and terminal-owned
+WebMCP permission guidance.
+
 The runtime keeps prompt additions small and cache-stable while preserving the
 newest working context. Automatic compaction uses a non-configurable continuity
 tail target of approximately 20,000 estimated tokens. It retains complete
 user/assistant/tool protocol groups verbatim, removes an incomplete trailing tool
 call, and summarizes only the older prefix. Unless an explicit harness threshold
-is configured, the effective hard threshold is based on the smaller of the
-provider's hard context capacity and the 160,000-token default session budget;
-the trigger is 90% of that ceiling. Explicit thresholds remain capped by the
-provider capacity. A soft threshold at 90% of the effective hard threshold marks
-compaction pending for the next outer turn boundary; the hard threshold compacts
-before the next model request. Provider-native compaction results are normalized
+is configured, the effective hard threshold is the resolved model capacity,
+bounded by the provider route and a positive `context.max_context_tokens` safety
+ceiling, minus the next request's output reservation. The default safety ceiling
+is zero (automatic). Known request output limits take precedence; otherwise
+4,096 tokens are reserved. Explicit thresholds may lower this boundary but
+cannot bypass it. Prompt and tool overhead count toward pressure; per-turn
+tracing records the context denominator. A derived soft boundary marks
+compaction pending for the next outer turn boundary; the effective prompt
+threshold compacts before the next model request. Provider-native compaction results are normalized
 through the same tail rules, with local fallback when the provider does not
 return a usable tail.
 

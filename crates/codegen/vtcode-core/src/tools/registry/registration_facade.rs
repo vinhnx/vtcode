@@ -5,6 +5,13 @@ use anyhow::Result;
 use super::{ToolRegistration, ToolRegistry};
 
 impl ToolRegistry {
+    /// Resolve trusted network metadata through the same alias inventory as execution.
+    pub fn tool_network_access(&self, name: &str) -> super::ToolNetworkAccess {
+        self.inventory
+            .registration_for(name)
+            .map(|registration| registration.metadata().network_access())
+            .unwrap_or_default()
+    }
     /// Register or replace a tool with the registry.
     ///
     /// # Arguments

@@ -63,7 +63,13 @@ mod tool;
 
 pub use call::{FunctionCall, ToolCall};
 pub use message::{AssistantPhase, ContentPart, ImageDetail, Message, MessageClearAt, MessageContent, MessageRole};
-pub use provider_trait::{LLMError, LLMErrorMetadata, LLMProvider, ProviderCapabilities, get_cached_capabilities};
+pub use provider_trait::{
+    ContextWindowProvider, LLMError, LLMErrorMetadata, LLMProvider, ProviderCapabilities, get_cached_capabilities,
+};
+pub(crate) use provider_trait::{
+    GENERIC_REASONING_EFFORTS, catalog_context_window, catalog_or_explicit_reasoning_efforts,
+    catalog_or_generic_reasoning_efforts, catalog_reasoning_efforts,
+};
 pub use request::{
     AnthropicOptionalStringOverride, AnthropicOptionalU32Override, AnthropicRequestOverrides, AnthropicThinkingConfig,
     AnthropicThinkingDisplayOverride, AnthropicThinkingModeOverride, CodingAgentSettings, FallbackModel, LLMRequest,

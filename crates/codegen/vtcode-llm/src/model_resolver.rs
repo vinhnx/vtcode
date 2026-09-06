@@ -58,7 +58,29 @@ impl ResolvedModel {
     pub fn reasoning_supported(&self) -> bool {
         self.catalog
             .map(|entry| entry.reasoning)
-            .unwrap_or_else(|| self.provider.supports_reasoning_effort(&self.model_id))
+            .unwrap_or_else(|| self.provider.supports_reasoning(&self.model_id))
+    }
+
+    /// Whether this route accepts a configurable reasoning effort.
+    ///
+    /// Curated catalog entries are authoritative: a model can expose
+    /// structured reasoning while intentionally leaving the effort list empty.
+    /// Provider trait metadata remains the fallback for explicitly configured
+    /// custom routes.
+    pub fn reasoning_effort_supported(&self) -> bool {
+        self.catalog
+            .map(|entry| !entry.reasoning_efforts.is_empty())
+            .unwrap_or_else(|| {
+                self.provider.supports_reasoning_effort(&self.model_id)
+                    && !self.provider.supported_reasoning_efforts(&self.model_id).is_empty()
+            })
+    }
+
+    /// Exact effort levels accepted by this resolved route.
+    pub fn supported_reasoning_efforts(&self) -> &'static [&'static str] {
+        self.catalog
+            .map(|entry| entry.reasoning_efforts)
+            .unwrap_or_else(|| self.provider.supported_reasoning_efforts(&self.model_id))
     }
 
     pub fn service_tier_supported(&self) -> bool {
@@ -291,16 +313,18 @@ impl ModelResolver {
         storage_mode: AuthCredentialsStoreMode,
     ) -> ResolvedModel {
         let catalog = model_catalog_entry(provider.as_ref(), model);
-        let dynamic = if catalog.is_some() || !has_dynamic_model(provider, model, dynamic_models) {
+        let dynamic = if catalog.is_some() {
             None
-        } else {
-            dynamic_meta.or_else(|| {
-                Some(DynamicModelMeta {
-                    display_name: model.to_string(),
-                    description: None,
-                    context_window: None,
-                })
+        } else if dynamic_meta.is_some() {
+            dynamic_meta
+        } else if has_dynamic_model(provider, model, dynamic_models) {
+            Some(DynamicModelMeta {
+                display_name: model.to_string(),
+                description: None,
+                context_window: None,
             })
+        } else {
+            None
         };
 
         ResolvedModel {
@@ -323,16 +347,18 @@ impl ModelResolver {
     ) -> ResolvedModel {
         let provider = model_id.provider();
         let catalog = model_catalog_entry(provider.as_ref(), &model_id.as_str());
-        let dynamic = if catalog.is_some() || !has_dynamic_model(provider, requested_model, dynamic_models) {
+        let dynamic = if catalog.is_some() {
             None
-        } else {
-            dynamic_meta.or_else(|| {
-                Some(DynamicModelMeta {
-                    display_name: requested_model.to_string(),
-                    description: None,
-                    context_window: None,
-                })
+        } else if dynamic_meta.is_some() {
+            dynamic_meta
+        } else if has_dynamic_model(provider, requested_model, dynamic_models) {
+            Some(DynamicModelMeta {
+                display_name: requested_model.to_string(),
+                description: None,
+                context_window: None,
             })
+        } else {
+            None
         };
 
         ResolvedModel {
@@ -513,7 +539,7 @@ mod tests {
 
         assert_eq!(resolved.provider, Provider::OpenAI);
         assert!(resolved.known_model());
-        assert_eq!(resolved.display_name(), "GPT-5.4");
+        assert_eq!(resolved.display_name(), "GPT-5.6 Sol");
     }
 
     #[test]
@@ -523,13 +549,13 @@ mod tests {
 
         let zen = ModelResolver::resolve(None, "opencode/glm-5.1", &[], None).expect("opencode zen");
         assert_eq!(zen.provider, Provider::OpenCodeZen);
-        assert!(zen.known_model());
-        assert_eq!(zen.display_name(), "GLM-5.1 (OpenCode Zen)");
+        assert!(!zen.known_model(), "OpenCode Zen models are not in the generated catalog");
+        assert_eq!(zen.display_name(), "opencode/glm-5.1");
 
         let go = ModelResolver::resolve(None, "opencode-go/glm-5.1", &[], None).expect("opencode go");
         assert_eq!(go.provider, Provider::OpenCodeGo);
-        assert!(go.known_model());
-        assert_eq!(go.display_name(), "GLM-5.1 (OpenCode Go)");
+        assert!(!go.known_model(), "OpenCode Go models are not in the generated catalog");
+        assert_eq!(go.display_name(), "opencode-go/glm-5.1");
     }
 
     #[test]
@@ -538,6 +564,16 @@ mod tests {
 
         assert_eq!(resolved.provider, Provider::NVIDIA);
         assert!(resolved.known_model());
+    }
+
+    #[test]
+    fn resolver_uses_catalog_metadata_for_namespaced_evolink_models() {
+        let resolved = ModelResolver::resolve(None, "evolink/deepseek-v4-pro", &[], None).expect("model");
+
+        assert_eq!(resolved.provider, Provider::Evolink);
+        assert!(resolved.known_model());
+        assert_eq!(resolved.context_window(), Some(163_840));
+        assert_eq!(resolved.supported_reasoning_efforts(), &["low", "medium", "high"]);
     }
 
     #[test]
@@ -560,6 +596,16 @@ mod tests {
         let routing = ModelResolver::resolve(Some("merge-gateway"), "default_routing", &[], None).expect("Merge route");
         assert!(routing.known_model());
         assert!(!routing.reasoning_supported());
+    }
+
+    #[test]
+    fn resolver_separates_structured_reasoning_from_effort_support() {
+        let resolved =
+            ModelResolver::resolve(Some("openrouter"), "meta/muse-spark-1.2", &[], None).expect("OpenRouter route");
+
+        assert!(resolved.reasoning_supported());
+        assert!(!resolved.reasoning_effort_supported());
+        assert!(resolved.supported_reasoning_efforts().is_empty());
     }
 
     #[test]

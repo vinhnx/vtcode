@@ -1317,8 +1317,14 @@ pub fn effective_session_context_budget(provider_context_size: usize, session_co
 #[must_use]
 pub fn effective_context_budget(vt_cfg: Option<&VTCodeConfig>, provider: &dyn LLMProvider, model: &str) -> usize {
     use crate::llm::model_resolver::{DynamicModelMeta, ModelResolver};
+
     let provider_capacity = provider.effective_context_size(model);
-    let resolved = ModelResolver::resolve(
+    // Resolve through the shared model capability path so catalog entries and
+    // discovered model metadata participate in exactly the same calculation as
+    // request construction. The provider remains a hard route-specific ceiling
+    // because a catalog can describe a larger platform window than this endpoint
+    // exposes (or an explicit `ContextWindowProvider` override can narrow it).
+    let resolved_capacity = ModelResolver::resolve(
         Some(provider.name()),
         model,
         &[],
@@ -1327,11 +1333,14 @@ pub fn effective_context_budget(vt_cfg: Option<&VTCodeConfig>, provider: &dyn LL
             description: None,
             context_window: (provider_capacity > 0).then_some(provider_capacity),
         }),
-    );
-    let capacity = effective_session_context_budget(
-        resolved.as_ref().and_then(|model| model.context_window()).unwrap_or(0),
-        provider_capacity,
-    );
+    )
+    .and_then(|resolved| resolved.context_window())
+    // Custom provider names and dynamic model ids are intentionally not
+    // required to exist in the built-in catalog. The provider trait has
+    // already resolved the route-specific capacity, so keep that value when
+    // catalog resolution cannot identify the route.
+    .unwrap_or(provider_capacity);
+    let capacity = effective_session_context_budget(resolved_capacity, provider_capacity);
     let session_budget = vt_cfg.map_or_else(default_max_context_tokens, |cfg| cfg.context.max_context_tokens);
     effective_session_context_budget(capacity, session_budget)
 }

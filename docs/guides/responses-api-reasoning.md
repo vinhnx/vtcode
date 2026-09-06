@@ -65,7 +65,7 @@ VT Code's default OpenAI profile keeps `gpt-5.5` on a compact execution contract
     ```toml
     [agent.harness]
     auto_compaction_enabled = true
-    # Optional explicit threshold; if omitted VT Code uses ~90% of model context.
+    # Optional lower trigger; otherwise model/session capacity minus output reserve.
     auto_compaction_threshold_tokens = 200000
     ```
 
@@ -87,6 +87,20 @@ VT Code's default OpenAI profile keeps `gpt-5.5` on a compact execution contract
 4. If encrypted reasoning is enabled, the returned `encrypted_content` is replayed automatically on the next OpenAI Responses request.
 
 ## Taking it further
+
+### Capability mapping across providers
+
+The harness validates the configured effort against the active provider route's
+supported levels before sending a request. Unsupported effort blocks the turn
+with a `TurnBlocked` diagnostic; missing capability metadata does not imply support.
+`none` omits the effort control, while unknown values block rather than silently
+selecting a provider default. These rules apply to interactive and headless runs.
+
+Set `agent.allow_reasoning_effort_downgrade = true` to explicitly permit the nearest
+lower supported level, such as Max → XHigh → High. Each downgrade logs the requested
+and effective values. Upward coercion is never performed. The effective level also
+participates in the prompt-cache identity. Native provider serializers preserve
+the mapped value; catalog entries and provider profile overrides define support.
 
 -   Combine reasoning summary output with VT Code’s status line badge and telemetry for interactive tracing.
 -   Use reasoning effort tiers together with the status line’s `runtime.reasoning_effort` so your shell hook can show when the agent is "thinking" harder.

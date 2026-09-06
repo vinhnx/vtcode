@@ -102,7 +102,8 @@ pub(super) fn capture_turn_request_snapshot(
         && !ctx.plan_session.is_interview_denied();
     let active_primary_agent = ctx.active_primary_agent.active().clone();
     let active_model = resolve_effective_request_model(active_model, &active_primary_agent);
-    let context_window_size = ctx.provider_client.effective_context_size(&active_model);
+    let context_window_size =
+        vtcode_core::compaction::effective_context_budget(ctx.vt_cfg, ctx.provider_client.as_ref(), &active_model);
     let turn_timeout_secs = ctx
         .vt_cfg
         .map(|cfg| cfg.optimization.agent_execution.max_execution_time_secs)

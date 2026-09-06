@@ -692,8 +692,8 @@ auto_compaction_enabled = true
 auto_compaction_threshold_tokens = 120000
 
 [context]
-# Session safety budget; the default is 160000 tokens.
-max_context_tokens = 160000
+# Optional session safety ceiling; 0 follows the resolved model/provider capacity.
+max_context_tokens = 0
 
 [context.dynamic]
 enabled = true
@@ -706,12 +706,12 @@ Notes:
 - `agent.harness.auto_compaction_enabled` enables automatic compaction when prompt-side token pressure crosses the configured threshold.
 - Disabling `agent.harness.auto_compaction_enabled` skips normal threshold-triggered compaction but does not disable the single bounded post-tool recovery compaction used to recover from a provider failure after tool output.
 - `agent.harness.auto_compaction_threshold_tokens` applies to both provider-native compaction and VT Code's local fallback compaction. It remains authoritative when set, but never exceeds the provider's hard context capacity.
-- When the harness threshold is unset, VT Code derives the effective hard threshold from `min(provider_context_size, context.max_context_tokens)` and applies the 90% trigger ratio. The default 160,000-token session budget therefore triggers at approximately 144,000 tokens for providers with larger context windows.
+- When the harness threshold is unset, VT Code derives the effective prompt budget from the resolved model capacity, the provider route, and a positive `context.max_context_tokens` ceiling. It reserves the next response before deciding whether the request fits.
 - `context.max_context_tokens = 0` preserves provider-only threshold resolution for compatibility; a known provider capacity is still a hard upper bound.
 - `context.dynamic.persist_history = true` lets VT Code persist compaction artifacts and the session memory envelope so later resumes and summarized forks can reuse that context.
 - `context.dynamic.retained_user_messages` controls how many recent real user messages VT Code preserves verbatim on the local fallback compaction path and in summarized forks. The default is `4`.
 - The session memory envelope is VT Code's durable working-memory artifact. It is refreshed at turn boundaries and after completed child-agent results, then persisted beside history artifacts as `.memory.json`.
-- A soft compaction threshold at 90% of the effective hard threshold defers compaction to the next outer turn boundary; the hard threshold compacts before the next model request. Compaction does not issue a hidden summary request from inside an active tool loop.
+- A soft boundary may mark compaction for the next outer turn boundary; the effective prompt threshold still reserves output before the next model request. Compaction does not issue a hidden summary request from inside an active tool loop.
 - Steering follow-ups are stored in schema-version 3 envelopes as UUID-tagged intents: at most 16 pending intents and the most recent 64 applied IDs are retained for restart recovery.
 
 ## MCP integration

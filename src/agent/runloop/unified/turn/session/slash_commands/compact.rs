@@ -176,6 +176,7 @@ fn resolve_manual_compaction_options(
         instructions: options.instructions.and_then(trimmed_optional).or(default_prompt),
         max_output_tokens: options.max_output_tokens,
         reasoning_effort: options.reasoning_effort,
+        allow_reasoning_effort_downgrade: options.allow_reasoning_effort_downgrade,
         verbosity: options.verbosity,
     }
 }

@@ -23,8 +23,18 @@ pub enum ToolCatalogSource {
     Dynamic,
 }
 
+/// Trusted registration metadata, never inferred from model-facing tool names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolNetworkAccess {
+    Local,
+    Network,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ToolRegistrationSpec {
+    network_access: ToolNetworkAccess,
     description: Option<String>,
     parameter_schema: Option<Value>,
     config_schema: Option<Value>,
@@ -39,6 +49,9 @@ pub struct ToolRegistrationSpec {
 }
 
 impl ToolRegistrationSpec {
+    pub fn network_access(&self) -> ToolNetworkAccess {
+        self.network_access
+    }
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self
@@ -188,6 +201,10 @@ impl fmt::Debug for ToolRegistration {
 }
 
 impl ToolRegistration {
+    pub fn with_network_access(mut self, access: ToolNetworkAccess) -> Self {
+        self.metadata.network_access = access;
+        self
+    }
     pub fn new(
         name: impl Into<Arc<str>>,
         capability: CapabilityLevel,

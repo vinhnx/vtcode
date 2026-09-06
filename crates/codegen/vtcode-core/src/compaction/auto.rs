@@ -14,12 +14,12 @@ use anyhow::Result;
 use crate::compaction::memory_envelope::{
     MemoryEnvelopePersistence, MemoryEnvelopePlacement, SessionMemoryEnvelopeUpdate,
     dedup_repeated_file_reads_for_local_compaction, effective_compaction_threshold_with_reserve,
-    persist_memory_envelope_async_with_update, strip_existing_memory_envelope,
+    effective_context_budget, persist_memory_envelope_async_with_update, strip_existing_memory_envelope,
 };
 use crate::compaction::two_pass::fingerprint_prefix;
 use crate::compaction::{
     CompactionConfig, CompactionStrategy, ManualCompactionOptions, SUPPRESS_NONE, build_local_compacted_history,
-    build_summary_prompt, classify_suppress_reason, compact_history_manual, manual_compaction_strategy,
+    build_summary_prompt, classify_suppress_reason, compact_history_manual_with_budget, manual_compaction_strategy,
 };
 use crate::exec::events::CompactionMode;
 use crate::llm::provider::{LLMProvider, LLMRequest, Message};
@@ -115,6 +115,14 @@ pub async fn auto_compact_messages(
         return Ok(None);
     }
 
+    // Use the same provider/session intersection as the trigger and preflight
+    // paths. Native and local strategies must share this ceiling so a large
+    // provider window cannot bypass an explicit session cap.
+    let context_budget = match effective_context_budget(vt_cfg, provider, model) {
+        0 => None,
+        budget => Some(budget),
+    };
+
     let mut compaction_input = history.clone();
     strip_existing_memory_envelope(&mut compaction_input);
     let original_history = compaction_input.clone();
@@ -122,8 +130,15 @@ pub async fn auto_compact_messages(
     let compaction_result: Result<Option<AutoCompactionOutcome>> = async {
         // Try two-pass with prefire cache before falling back to single-pass.
         if let Some(prefire_state) = prefire {
-            if let Some(mut compacted) =
-                try_two_pass_with_prefire(prefire_state, provider, model, &original_history, &engine_cfg).await?
+            if let Some(mut compacted) = try_two_pass_with_prefire(
+                prefire_state,
+                provider,
+                model,
+                &original_history,
+                &engine_cfg,
+                context_budget,
+            )
+            .await?
             {
                 let original_len = original_history.len();
                 let envelope = persist_memory_envelope_async_with_update(
@@ -139,6 +154,8 @@ pub async fn auto_compact_messages(
                     steering_update,
                 )
                 .await?;
+                compacted =
+                    crate::compaction::bound_compacted_history_to_context(compacted, provider, model, context_budget);
                 let history_artifact_path = envelope.as_ref().and_then(|item| item.history_artifact_path.clone());
                 let compacted_len = compacted.len();
                 *history = compacted;
@@ -172,8 +189,15 @@ pub async fn auto_compact_messages(
             return Ok(None);
         }
 
-        let (mut compacted, mode) =
-            compact_history_manual(provider, model, &compaction_history, &engine_cfg, &manual_options).await?;
+        let (mut compacted, mode) = compact_history_manual_with_budget(
+            provider,
+            model,
+            &compaction_history,
+            &engine_cfg,
+            &manual_options,
+            context_budget,
+        )
+        .await?;
 
         if compacted == compaction_history {
             return Ok(None);
@@ -193,6 +217,7 @@ pub async fn auto_compact_messages(
             steering_update,
         )
         .await?;
+        compacted = crate::compaction::bound_compacted_history_to_context(compacted, provider, model, context_budget);
         let history_artifact_path = envelope.as_ref().and_then(|item| item.history_artifact_path.clone());
         let compacted_len = compacted.len();
         *history = compacted;
@@ -236,6 +261,7 @@ async fn try_two_pass_with_prefire(
     model: &str,
     history: &[Message],
     config: &CompactionConfig,
+    context_budget: Option<usize>,
 ) -> Result<Option<Vec<Message>>> {
     let cache = match prefire.take() {
         Some(cache) => cache,
@@ -272,7 +298,8 @@ async fn try_two_pass_with_prefire(
         return Ok(None);
     }
 
-    let effective_config = crate::compaction::context_bounded_compaction_config(provider, model, history, config);
+    let effective_config =
+        crate::compaction::context_bounded_compaction_config(provider, model, history, config, context_budget);
     let compacted = build_local_compacted_history(
         history,
         &note2,
@@ -281,7 +308,12 @@ async fn try_two_pass_with_prefire(
         true,
     );
 
-    Ok(Some(crate::compaction::bound_compacted_history_to_context(compacted, provider, model)))
+    Ok(Some(crate::compaction::bound_compacted_history_to_context(
+        compacted,
+        provider,
+        model,
+        context_budget,
+    )))
 }
 
 #[cfg(test)]

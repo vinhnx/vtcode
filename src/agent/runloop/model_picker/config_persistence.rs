@@ -126,6 +126,7 @@ mod tests {
             model: model.to_string(),
             model_display: model.to_string(),
             known_model: false,
+            context_window: None,
             reasoning_supported: false,
             reasoning: ReasoningEffortLevel::Medium,
             reasoning_changed: false,

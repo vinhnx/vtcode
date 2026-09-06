@@ -1,12 +1,12 @@
 use hashbrown::HashMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use portable_pty::{CommandBuilder, PtySize};
 
 use super::command_utils::is_shell_program;
-use crate::sandboxing::should_filter_env_var;
+use crate::sandboxing::build_sanitized_env;
 use crate::tools::path_env;
 use crate::tools::shell_snapshot::ShellSnapshot;
 
@@ -29,29 +29,54 @@ pub(super) fn set_command_environment_with_sandbox(
     workspace_root: &Path,
     extra_paths: &[PathBuf],
     extra_env: &HashMap<String, String>,
+    trusted_env: &HashMap<String, String>,
     sandbox_active: bool,
 ) {
-    // Inherit environment from parent process to preserve PATH and other important variables
-    let mut env_map: HashMap<OsString, OsString> = std::env::vars_os().collect();
-
+    // `portable_pty::CommandBuilder` starts with a snapshot of the parent
+    // environment. Clear that snapshot before applying the allowlist; merely
+    // setting sanitized keys would otherwise leave filtered credentials and
+    // loader variables available to the child.
     if sandbox_active {
-        env_map.retain(|key, _| !should_filter_env_var(&key.to_string_lossy()));
+        builder.env_clear();
+    }
+
+    // Start from the caller's environment and apply explicit overrides before
+    // the shared sandbox allowlist. This keeps the policy identical for pipe
+    // and PTY sessions and prevents arbitrary override names from reaching a
+    // restricted child process.
+    let mut env_map: HashMap<String, String> = std::env::vars().collect();
+    for (key, value) in extra_env {
+        env_map.insert(key.clone(), value.clone());
+    }
+    let env_map = if sandbox_active {
+        build_sanitized_env(&env_map, true, false, "pty", &[])
+    } else {
+        env_map
+    };
+
+    // Internal bridge variables are supplied by the trusted PTY manager, not
+    // by the command payload. Apply them after sanitization so the bridge
+    // remains available without widening the user override allowlist.
+    let mut env_map = env_map;
+    for (key, value) in trusted_env {
+        env_map.insert(key.clone(), value.clone());
     }
 
     // Ensure HOME is set - this is crucial for proper path expansion in cargo and other tools
-    let home_key = OsString::from("HOME");
+    let home_key = "HOME".to_string();
     if let Some(home_dir) = dirs::home_dir() {
-        env_map.entry(home_key).or_insert_with(|| OsString::from(home_dir.as_os_str()));
+        env_map
+            .entry(home_key)
+            .or_insert_with(|| home_dir.to_string_lossy().into_owned());
     }
 
-    let path_key = OsString::from("PATH");
-    let current_path = env_map.get(&path_key).map(|value| value.as_os_str());
+    let current_path = env_map.get("PATH").map(OsStr::new);
     if let Some(merged) = path_env::merge_path_env(current_path, extra_paths) {
-        env_map.insert(path_key, merged);
+        env_map.insert("PATH".to_string(), merged.to_string_lossy().into_owned());
     }
 
     for (key, value) in env_map {
-        builder.env(key, value);
+        builder.env(OsString::from(key), OsString::from(value));
     }
 
     // Override or set specific environment variables for TTY
@@ -86,12 +111,6 @@ pub(super) fn set_command_environment_with_sandbox(
     builder.env_remove("MallocScribble");
     builder.env_remove("MallocDoNotProtectSentinel");
     builder.env_remove("MallocQuiet");
-
-    for (key, value) in extra_env {
-        if !sandbox_active || !should_filter_env_var(key) {
-            builder.env(key, value);
-        }
-    }
 
     if is_shell_program(program) {
         builder.env("SHELL", program);

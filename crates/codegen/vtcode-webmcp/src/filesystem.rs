@@ -535,7 +535,7 @@ impl RuntimeAdapter for FilesystemWorkspace {
         let (program, arguments) = args
             .split_first()
             .ok_or_else(|| WebmcpError::InvalidRequest("check command cannot be empty".to_string()))?;
-        let executable = resolve_check_executable(program)?;
+        let executable = resolve_check_executable(program, self.root.as_ref())?;
         // Capture host toolchain locations before replacing HOME with the
         // workspace sandbox HOME. This keeps checks reproducible without
         // allowing the child to inherit the caller's complete environment.
@@ -547,15 +547,15 @@ impl RuntimeAdapter for FilesystemWorkspace {
         let _ = environment.insert("HOME".to_string(), self.root.display().to_string());
         let _ = environment.insert("CARGO_NET_OFFLINE".to_string(), "true".to_string());
         let _ = environment.insert("CARGO_TERM_COLOR".to_string(), "never".to_string());
-        let cargo_home = std::env::var_os("CARGO_HOME")
-            .map(PathBuf::from)
-            .or_else(|| host_home.as_ref().map(|home| home.join(".cargo")));
+        let cargo_home = host_home
+            .as_ref()
+            .and_then(|home| trusted_toolchain_directory(&home.join(".cargo"), self.root.as_ref()));
         if let Some(cargo_home) = cargo_home {
             let _ = environment.insert("CARGO_HOME".to_string(), cargo_home.to_string_lossy().into_owned());
         }
-        let rustup_home = std::env::var_os("RUSTUP_HOME")
-            .map(PathBuf::from)
-            .or_else(|| host_home.as_ref().map(|home| home.join(".rustup")));
+        let rustup_home = host_home
+            .as_ref()
+            .and_then(|home| trusted_toolchain_directory(&home.join(".rustup"), self.root.as_ref()));
         if let Some(rustup_home) = rustup_home {
             let _ = environment.insert("RUSTUP_HOME".to_string(), rustup_home.to_string_lossy().into_owned());
         }
@@ -1030,7 +1030,12 @@ fn visit_directory(
     Ok(())
 }
 
-fn resolve_check_executable(program: &str) -> Result<PathBuf> {
+fn trusted_toolchain_directory(path: &Path, workspace: &Path) -> Option<PathBuf> {
+    let canonical = vtcode_commons::canonicalize(path).ok()?;
+    (canonical.is_dir() && !canonical.starts_with(workspace)).then_some(canonical)
+}
+
+fn resolve_check_executable(program: &str, workspace: &Path) -> Result<PathBuf> {
     let executable_name = if cfg!(windows) {
         format!("{program}.exe")
     } else {
@@ -1041,9 +1046,6 @@ fn resolve_check_executable(program: &str) -> Result<PathBuf> {
     #[cfg(unix)]
     {
         if program == "cargo" {
-            if let Some(cargo_home) = std::env::var_os("CARGO_HOME") {
-                candidates.push(PathBuf::from(cargo_home).join("bin").join(&executable_name));
-            }
             if let Some(home) = std::env::var_os("HOME") {
                 candidates.push(PathBuf::from(home).join(".cargo/bin").join(&executable_name));
             }
@@ -1069,6 +1071,9 @@ fn resolve_check_executable(program: &str) -> Result<PathBuf> {
         let Ok(canonical) = vtcode_commons::canonicalize(&candidate) else {
             continue;
         };
+        if canonical.starts_with(workspace) {
+            continue;
+        }
         let Ok(metadata) = std::fs::metadata(&canonical) else {
             continue;
         };

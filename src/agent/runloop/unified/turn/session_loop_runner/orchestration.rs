@@ -836,7 +836,16 @@ pub(crate) async fn run_single_agent_loop_unified_impl(
                         } else {
                             plan_seed
                         };
-                        let previous_context_usage_percent = context_manager.context_usage_percent(max_context_tokens);
+                        let current_context_budget = vtcode_core::compaction::effective_context_budget(
+                            vt_cfg.as_ref(),
+                            provider_client.as_ref(),
+                            &crate::agent::runloop::unified::turn::turn_processing::resolve_effective_request_model(
+                                &config.model,
+                                active_primary_agent.active(),
+                            ),
+                        );
+                        let previous_context_usage_percent =
+                            context_manager.context_usage_percent(current_context_budget);
                         if fresh_context {
                             handle.set_activity_state(ActivityState::RestoringApprovedPlan);
                             runtime.clear_pending_follow_up_inputs();
@@ -1319,7 +1328,16 @@ pub(crate) async fn run_single_agent_loop_unified_impl(
                         continue;
                     }
                     if fresh_context {
-                        let previous_context_usage_percent = context_manager.context_usage_percent(max_context_tokens);
+                        let current_context_budget = vtcode_core::compaction::effective_context_budget(
+                            vt_cfg.as_ref(),
+                            provider_client.as_ref(),
+                            &crate::agent::runloop::unified::turn::turn_processing::resolve_effective_request_model(
+                                &config.model,
+                                active_primary_agent.active(),
+                            ),
+                        );
+                        let previous_context_usage_percent =
+                            context_manager.context_usage_percent(current_context_budget);
                         plan_seed = load_active_plan_seed(&tool_registry).await.or(plan_seed.take());
                         handle.set_activity_state(ActivityState::RestoringApprovedPlan);
                         runtime.clear_pending_follow_up_inputs();

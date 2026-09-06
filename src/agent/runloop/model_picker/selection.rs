@@ -24,6 +24,7 @@ pub(super) struct SelectionDetail {
     pub(super) known_model: bool,
     pub(super) context_window: Option<usize>,
     pub(super) reasoning_supported: bool,
+    pub(super) reasoning_effort_supported: bool,
     pub(super) reasoning_optional: bool,
     pub(super) reasoning_off_model: Option<ModelId>,
     pub(super) service_tier_supported: bool,
@@ -54,6 +55,7 @@ pub(crate) struct ModelSelectionResult {
     pub(crate) model: String,
     pub(crate) model_display: String,
     pub(crate) known_model: bool,
+    pub(crate) context_window: Option<usize>,
     pub(crate) reasoning_supported: bool,
     pub(crate) reasoning: ReasoningEffortLevel,
     pub(crate) reasoning_changed: bool,
@@ -143,6 +145,10 @@ pub(super) fn parse_model_selection(
             known_model: false,
             context_window: profile.as_ref().and_then(|profile| profile.context_window),
             reasoning_supported: profile.as_ref().and_then(|profile| profile.supports_reasoning).unwrap_or(false),
+            reasoning_effort_supported: profile
+                .as_ref()
+                .and_then(|profile| profile.supports_reasoning_effort)
+                .unwrap_or(false),
             reasoning_optional: true,
             reasoning_off_model: None,
             service_tier_supported: false,
@@ -185,6 +191,7 @@ pub(super) fn parse_model_selection(
         known_model: false,
         context_window: None,
         reasoning_supported: false,
+        reasoning_effort_supported: false,
         reasoning_optional: true,
         reasoning_off_model: None,
         service_tier_supported: false,
@@ -351,6 +358,7 @@ pub(super) fn selections_from_custom_provider(provider: &CustomProviderConfig) -
             known_model: false,
             context_window: provider.resolved_profile(&model_id).context_window,
             reasoning_supported: provider.resolved_profile(&model_id).supports_reasoning.unwrap_or(false),
+            reasoning_effort_supported: provider.resolved_profile(&model_id).supports_reasoning_effort.unwrap_or(false),
             reasoning_optional: true,
             reasoning_off_model: None,
             service_tier_supported: false,
@@ -380,6 +388,7 @@ fn selection_from_resolved(
         known_model: resolved.known_model(),
         context_window: resolved.context_window(),
         reasoning_supported: resolved.reasoning_supported(),
+        reasoning_effort_supported: resolved.reasoning_effort_supported(),
         reasoning_optional,
         reasoning_off_model,
         service_tier_supported: resolved.service_tier_supported(),
@@ -387,6 +396,50 @@ fn selection_from_resolved(
         uses_chatgpt_auth: resolved.availability.uses_managed_auth(),
         env_key,
         mimo_auth_method: None,
+    }
+}
+
+impl SelectionDetail {
+    /// Return effort levels accepted by the selected route.
+    ///
+    /// Built-in and dynamic providers resolve through the shared model
+    /// catalog. Custom providers retain the documented generic effort set
+    /// when their profile explicitly enables configurable reasoning.
+    pub(super) fn reasoning_effort_levels(&self) -> Vec<ReasoningEffortLevel> {
+        let mut levels = Vec::new();
+        if supports_gpt5_none_reasoning(&self.model_id) {
+            levels.push(ReasoningEffortLevel::None);
+        }
+
+        if let Some(provider) = self.provider_enum {
+            if let Some(resolved) = ModelResolver::resolve(Some(provider.as_ref()), &self.model_id, &[], None) {
+                levels.extend(
+                    resolved
+                        .supported_reasoning_efforts()
+                        .iter()
+                        .filter_map(|level| ReasoningEffortLevel::parse(level)),
+                );
+            }
+        } else if self.reasoning_effort_supported {
+            levels.extend([
+                ReasoningEffortLevel::Low,
+                ReasoningEffortLevel::Medium,
+                ReasoningEffortLevel::High,
+            ]);
+        }
+
+        levels.sort_unstable_by_key(|level| match level {
+            ReasoningEffortLevel::None => 0,
+            ReasoningEffortLevel::Minimal => 1,
+            ReasoningEffortLevel::Low => 2,
+            ReasoningEffortLevel::Medium => 3,
+            ReasoningEffortLevel::High => 4,
+            ReasoningEffortLevel::XHigh => 5,
+            ReasoningEffortLevel::Max => 6,
+            ReasoningEffortLevel::Unknown => usize::MAX,
+        });
+        levels.dedup();
+        levels
     }
 }
 
@@ -408,49 +461,20 @@ pub(super) fn supports_gpt5_none_reasoning(model_id: &str) -> bool {
         || matches!(model_id, "gpt-5.2-codex" | "gpt-5-codex")
 }
 
-pub(super) fn supports_xhigh_reasoning(model_id: &str) -> bool {
-    matches!(
-        model_id,
-        "gpt-5.6"
-            | "gpt-5.2-codex"
-            | "gpt-5.6-sol"
-            | "gpt-5.5-2026-04-23"
-            | "gpt-5-codex"
-            | "gpt-5.6-terra"
-            | "gpt-5.6-luna"
-            | "gpt-6-astra"
-            | "claude-sonnet-5"
-            | "claude-fable-5"
-            | "claude-mythos-5"
-            | "claude-opus-5"
-            | "grok-4.6"
-            | "muse-spark-1.1"
-            | "muse-spark-1.2"
-            | "muse-spark-1.2-contributor"
-            | "muse-spark-1.3"
-            | "muse-spark-1.3-contributor"
-    )
+#[cfg(test)]
+fn catalog_supports_reasoning_effort(model_id: &str, effort: &str) -> bool {
+    ModelResolver::resolve(None, model_id, &[], None)
+        .is_some_and(|resolved| resolved.supported_reasoning_efforts().contains(&effort))
 }
 
+#[cfg(test)]
+pub(super) fn supports_xhigh_reasoning(model_id: &str) -> bool {
+    catalog_supports_reasoning_effort(model_id, "xhigh")
+}
+
+#[cfg(test)]
 pub(super) fn supports_max_reasoning(model_id: &str) -> bool {
-    matches!(
-        model_id,
-        "gpt-5.6-sol"
-            | "gpt-5.6-terra"
-            | "gpt-5.6-luna"
-            | "gpt-5.6"
-            | "gpt-6-astra"
-            | "claude-sonnet-5"
-            | "claude-fable-5"
-            | "claude-mythos-5"
-            | "claude-opus-5"
-            | "deepseek-v4-pro"
-            | "deepseek-v4-flash"
-            | "kimi-k3"
-            | "glm-5.3"
-            | "glm-5.3-flash"
-            | "glm-5.2"
-    )
+    catalog_supports_reasoning_effort(model_id, "max")
 }
 
 pub(super) fn reasoning_level_description(level: ReasoningEffortLevel) -> &'static str {

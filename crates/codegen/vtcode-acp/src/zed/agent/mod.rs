@@ -34,6 +34,7 @@ mod updates;
 /// `cx.spawn` tasks and held inside the global connection registry.
 pub(crate) struct ZedAgent {
     config: CoreAgentConfig,
+    allow_reasoning_effort_downgrade: bool,
     credential_storage_mode: AuthCredentialsStoreMode,
     system_prompt: String,
     sessions: Arc<Mutex<HashMap<acp::SessionId, SessionHandle>>>,
@@ -54,6 +55,7 @@ pub(crate) struct ZedAgent {
 impl ZedAgent {
     pub(crate) async fn new(
         config: CoreAgentConfig,
+        allow_reasoning_effort_downgrade: bool,
         credential_storage_mode: AuthCredentialsStoreMode,
         zed_config: AgentClientProtocolZedConfig,
         tools_config: ToolsConfig,
@@ -102,6 +104,7 @@ impl ZedAgent {
 
         Self {
             config,
+            allow_reasoning_effort_downgrade,
             credential_storage_mode,
             system_prompt,
             sessions: Arc::new(Mutex::new(HashMap::with_capacity(10))),

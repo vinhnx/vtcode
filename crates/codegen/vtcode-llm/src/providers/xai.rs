@@ -74,12 +74,20 @@ impl_openai_compat_provider!(XAIProvider, XaiSpec, {
             || models::xai::REASONING_MODELS.contains(&requested)
     }
 
-    fn supports_reasoning_effort(&self, _model: &str) -> bool {
+    fn supports_reasoning_effort(&self, model: &str) -> bool {
+        let requested = if model.trim().is_empty() {
+            &self.core.model
+        } else {
+            model
+        };
         self.core
             .model_behavior
             .as_ref()
             .and_then(|b| b.model_supports_reasoning_effort)
-            .unwrap_or(false)
+            .unwrap_or_else(|| {
+                vtcode_config::models::model_catalog_entry("xai", requested)
+                    .is_some_and(|entry| !entry.reasoning_efforts.is_empty())
+            })
     }
 });
 

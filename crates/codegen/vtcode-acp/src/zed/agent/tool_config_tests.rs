@@ -60,6 +60,7 @@ async fn build_agent_with_tools_config(workspace: &Path, tools_config: ToolsConf
 
     ZedAgent::new(
         core_config,
+        false,
         AuthCredentialsStoreMode::default(),
         zed_config,
         tools_config,

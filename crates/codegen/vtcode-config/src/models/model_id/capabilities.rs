@@ -33,6 +33,10 @@ pub struct ModelCatalogEntry {
     pub input_modalities: &'static [&'static str],
     pub caching: bool,
     pub structured_output: bool,
+    pub supports_sampling: bool,
+    pub supports_logprobs: bool,
+    pub prompt_cache_ttl: Option<&'static str>,
+    pub prompt_contract: Option<&'static str>,
     pub pricing: ModelPricing,
 }
 
@@ -114,8 +118,24 @@ fn capability_provider_key(provider: Provider) -> &'static str {
     }
 }
 
+fn catalog_lookup_id<'a>(provider: &str, id: &'a str) -> &'a str {
+    let provider_key = catalog_provider_key(provider);
+    if provider_key == "evolink"
+        && let Some((prefix, model_id)) = id.split_once('/')
+        && prefix.eq_ignore_ascii_case(provider_key)
+    {
+        // Evolink namespaces its ModelId values to avoid collisions with
+        // first-class providers, while its catalog stores the upstream model
+        // id that the gateway receives (for example, `deepseek-v4-pro`).
+        return model_id;
+    }
+    id
+}
+
 fn generated_catalog_entry(provider: &str, id: &str) -> Option<ModelCatalogEntry> {
-    capability_generated::metadata_for(catalog_provider_key(provider), id).map(|entry| ModelCatalogEntry {
+    let provider_key = catalog_provider_key(provider);
+    let lookup_id = catalog_lookup_id(provider_key, id);
+    capability_generated::metadata_for(provider_key, lookup_id).map(|entry| ModelCatalogEntry {
         provider: entry.provider,
         id: entry.id,
         display_name: entry.display_name,
@@ -131,6 +151,10 @@ fn generated_catalog_entry(provider: &str, id: &str) -> Option<ModelCatalogEntry
         input_modalities: entry.input_modalities,
         caching: entry.caching,
         structured_output: entry.structured_output,
+        supports_sampling: entry.supports_sampling,
+        supports_logprobs: entry.supports_logprobs,
+        prompt_cache_ttl: entry.prompt_cache_ttl,
+        prompt_contract: entry.prompt_contract,
         pricing: ModelPricing {
             input: entry.pricing.input,
             output: entry.pricing.output,
@@ -202,47 +226,8 @@ impl ModelId {
             return candidates.into_iter().next();
         }
 
-        let direct = match self {
-            ModelId::CopilotGPT52Codex | ModelId::CopilotGPT54 => Some(ModelId::CopilotGPT54Mini),
-            ModelId::DeepSeekV4Pro | ModelId::DeepSeekV4FlashVisionExp => Some(ModelId::DeepSeekV4Flash),
-            ModelId::MetaMuseSpark12 => Some(ModelId::MetaMuseSpark11),
-            ModelId::NvidiaNemotron3Ultra550bA55b => Some(ModelId::NvidiaNemotron3Nano30bA3b),
-            ModelId::NvidiaNemotron3Super120bA12b => Some(ModelId::NvidiaNemotron3Nano30bA3b),
-            ModelId::MergeGatewayDefaultRouting
-            | ModelId::MergeGatewayOpenAIGpt55
-            | ModelId::MergeGatewayAnthropicClaudeOpus5
-            | ModelId::MergeGatewayAnthropicClaudeFable51
-            | ModelId::MergeGatewayGoogleGemini36Flash
-            | ModelId::MergeGatewayGoogleGemini37Flash
-            | ModelId::MergeGatewayGoogleGemini38Flash
-            | ModelId::MergeGatewayDeepseekV4Flash0731
-            | ModelId::MergeGatewayDeepseekV4Flash0731Fast
-            | ModelId::MergeGatewayXaiGrok46
-            | ModelId::MergeGatewayQwen38Max
-            | ModelId::MergeGatewayMinimaxH3
-            | ModelId::MergeGatewayMoonshotKimiK3
-            | ModelId::MergeGatewayThinkingMachinesInkling
-            | ModelId::MergeGatewayMetaMuseSpark11
-            | ModelId::MergeGatewayMetaMuseSpark13
-            | ModelId::MergeGatewayOpenAIGpt56Luna
-            | ModelId::MergeGatewayOpenAIGpt56Sol
-            | ModelId::MergeGatewayOpenAIGpt56Terra
-            | ModelId::MergeGatewayOpenAIGpt6Astra => None,
-            ModelId::EvolinkDeepseekV4Pro => Some(ModelId::EvolinkDeepseekV4Flash),
-            ModelId::HuggingFaceDeepseekV4ProTogether => Some(ModelId::HuggingFaceDeepseekV4FlashNovita),
-            ModelId::HuggingFaceDeepseekV4ProNovita => Some(ModelId::HuggingFaceDeepseekV4FlashNovita),
-            ModelId::OllamaDeepseekV4ProCloud => Some(ModelId::OllamaDeepseekV4FlashCloud),
-            ModelId::XaiGrok420Reasoning => Some(ModelId::XaiGrokBuild01),
-            _ => None,
-        };
-
-        direct.and_then(|candidate| {
-            if candidate.supports_reasoning_effort() {
-                None
-            } else {
-                Some(candidate)
-            }
-        })
+        self.preferred_lightweight_variant()
+            .filter(|candidate| !candidate.is_reasoning_variant())
     }
 
     /// Check if this is a "flash" variant (optimized for speed)
@@ -383,7 +368,7 @@ impl ModelId {
         if let Some(meta) = self.openrouter_metadata() {
             return meta.reasoning;
         }
-        self.provider().supports_reasoning_effort(&self.as_str())
+        self.provider().supports_reasoning(&self.as_str())
     }
 
     /// Determine whether the model supports tool calls/function execution

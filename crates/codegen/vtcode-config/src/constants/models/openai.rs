@@ -139,16 +139,6 @@ pub const DEPRECATED_MODEL_REPLACEMENTS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Returns true for GPT-6 Astra model IDs.
-///
-/// Centralizes the Astra check shared by request shaping (`vtcode-llm`
-/// request builder) and reasoning-parameter mapping (`rig_adapter`) so the
-/// two paths cannot diverge.
-#[must_use]
-pub fn is_gpt6_astra_model(model: &str) -> bool {
-    model == GPT_6_ASTRA
-}
-
 /// Returns the recommended replacement for a deprecated OpenAI model, if known.
 ///
 /// Returns `Some((replacement_id, reason))` when the model is a known
@@ -164,14 +154,6 @@ pub fn deprecated_model_replacement(model: &str) -> Option<(&'static str, &'stat
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn gpt6_astra_detector_matches_only_the_astra_id() {
-        assert!(is_gpt6_astra_model(GPT_6_ASTRA));
-        assert!(!is_gpt6_astra_model(GPT_5_6_SOL));
-        assert!(!is_gpt6_astra_model(GPT));
-        assert!(!is_gpt6_astra_model("gpt-6"));
-    }
 
     #[test]
     fn deprecated_gpt5_maps_to_gpt56_sol() {

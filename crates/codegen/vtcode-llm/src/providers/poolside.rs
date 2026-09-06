@@ -56,8 +56,8 @@ impl_openai_compat_provider!(PoolsideProvider, PoolsideSpec, {
         true
     }
 
-    fn effective_context_size(&self, _model: &str) -> usize {
-        131_072
+    fn effective_context_size(&self, model: &str) -> usize {
+        crate::provider::catalog_context_window("poolside", model, 131_072)
     }
 });
 

@@ -40,8 +40,8 @@ pub fn estimate_tool_definition_tokens(tools: &[ToolDefinition]) -> u64 {
 }
 
 pub use vtcode_llm::usage_cost::{
-    SessionCostEstimate, estimate_session_costs, estimate_session_costs_with_pricing, normalized_turn_usage,
-    provider_reports_exclusive_input,
+    SessionCostAccumulator, SessionCostEstimate, estimate_session_costs, estimate_session_costs_with_pricing,
+    normalized_turn_usage, provider_reports_exclusive_input, require_budget_pricing,
 };
 
 #[cfg(test)]

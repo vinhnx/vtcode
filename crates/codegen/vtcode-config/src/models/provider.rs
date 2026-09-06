@@ -6,16 +6,41 @@
 
 pub use vtcode_commons::provider::Provider;
 
-use super::ModelId;
+use super::{ModelId, model_catalog_entry};
 use std::str::FromStr;
+
+const GENERIC_REASONING_EFFORTS: &[&str] = &["low", "medium", "high"];
 
 /// Extension trait on `Provider` for model-specific capability queries.
 ///
 /// These methods require vtcode-config model catalogs and constants,
 /// so they cannot live in vtcode-commons with the core `Provider` type.
-pub trait ProviderModelSupport {
+pub trait ProviderModelSupport: AsRef<str> {
+    /// Determine if the provider/model exposes structured reasoning output.
+    ///
+    /// Catalog metadata is authoritative for curated models. Unknown routes
+    /// retain the provider's legacy capability fallback so custom endpoints
+    /// continue to work without a catalog entry.
+    fn supports_reasoning(&self, model: &str) -> bool {
+        model_catalog_entry(self.as_ref(), model)
+            .map(|entry| entry.reasoning)
+            .unwrap_or_else(|| self.supports_reasoning_effort(model))
+    }
+
     /// Determine if the provider supports configurable reasoning effort for the model.
     fn supports_reasoning_effort(&self, model: &str) -> bool;
+
+    /// Exact effort levels accepted by the provider/model route.
+    fn supported_reasoning_efforts(&self, model: &str) -> &'static [&'static str] {
+        if let Some(entry) = model_catalog_entry(self.as_ref(), model) {
+            return entry.reasoning_efforts;
+        }
+        if self.supports_reasoning_effort(model) {
+            GENERIC_REASONING_EFFORTS
+        } else {
+            &[]
+        }
+    }
 
     /// Determine if the provider supports the `service_tier` request parameter.
     fn supports_service_tier(&self, model: &str) -> bool;
@@ -23,6 +48,14 @@ pub trait ProviderModelSupport {
 
 impl ProviderModelSupport for Provider {
     fn supports_reasoning_effort(&self, model: &str) -> bool {
+        if let Some(entry) = model_catalog_entry(self.as_ref(), model) {
+            // Curated metadata is the single source of truth for known routes.
+            // This keeps newly generated catalog entries from depending on a
+            // second hand-maintained provider table and blocks effort payloads
+            // when a model only exposes structured reasoning.
+            return !entry.reasoning_efforts.is_empty();
+        }
+
         use crate::constants::models;
 
         match self {

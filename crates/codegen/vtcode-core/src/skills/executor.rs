@@ -36,7 +36,9 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 use vtcode_config::auth::OpenAIChatGptAuthHandle;
 
-use super::skill_policy::{SkillToolScope, merge_skill_command_permissions};
+use super::skill_policy::{
+    SkillToolScope, filter_registered_tools_for_skill, merge_skill_command_permissions, skill_function_tool_permitted,
+};
 
 pub use super::skill_policy::filter_tools_for_skill;
 
@@ -45,7 +47,7 @@ use crate::config::types::CapabilityLevel;
 #[cfg(test)]
 use crate::skills::types::{SkillFileSystemPermissions, SkillNetworkPolicy};
 #[cfg(test)]
-use crate::tools::registry::ToolRegistration;
+use crate::tools::registry::{ToolNetworkAccess, ToolRegistration};
 #[cfg(test)]
 use tempfile::tempdir;
 
@@ -206,12 +208,14 @@ impl ForkSkillExecutor for ChildAgentSkillExecutor {
         let session_id = child_session_id(&parent_session_id, skill.name());
         let mut runner = Box::pin(self.build_runner(skill, session_id.clone())).await?;
 
-        let restricted_tools = filter_tools_for_skill(skill, runner.build_universal_tools().await?);
+        let restricted_tools =
+            filter_registered_tools_for_skill(skill, runner.build_universal_tools().await?, &self.tool_registry);
         let allowed_tools = restricted_tools
             .iter()
             .map(|tool| tool.function_name().to_string())
             .collect::<Vec<_>>();
         runner.set_tool_definitions_override(restricted_tools);
+        runner.restrict_to_local_tools();
         runner.set_tool_arg_transform(skill_tool_arg_transform(skill.clone()));
         runner.enable_full_auto(&allowed_tools).await;
 
@@ -273,7 +277,7 @@ pub async fn execute_skill_with_sub_llm(
     debug!("Executing skill '{}' with LLM sub-call", skill.name());
 
     // Apply network policy filtering
-    let available_tools = filter_tools_for_skill(skill, available_tools);
+    let available_tools = filter_registered_tools_for_skill(skill, available_tools, tool_registry);
     let skill_tool_scope = SkillToolScope::from_definitions(&available_tools);
     let tool_definitions = if available_tools.is_empty() {
         None
@@ -386,7 +390,9 @@ pub async fn execute_skill_with_sub_llm(
 
                         debug!("Executing tool '{}' for skill '{}'", tool_name, skill.name());
 
-                        if !skill_tool_scope.permits(&tool_name) {
+                        if !skill_tool_scope.permits(&tool_name)
+                            || !skill_function_tool_permitted(tool_registry, &tool_name)
+                        {
                             let error = skill_tool_scope.denied_error(skill, &tool_name);
                             warn!(skill = skill.name(), tool = %tool_name, "Blocked out-of-scope skill tool call");
                             Arc::make_mut(&mut request.messages)
@@ -1294,11 +1300,14 @@ async fn skill_executor_allows_tool_only_response_before_final_content() {
     let tool_name = "tool_only_skill_test_tool";
     let tool_calls = Arc::new(Mutex::new(0usize));
     registry
-        .register_tool(ToolRegistration::from_tool_instance(
-            tool_name,
-            CapabilityLevel::CodeSearch,
-            CountingSkillTool { calls: Arc::clone(&tool_calls) },
-        ))
+        .register_tool(
+            ToolRegistration::from_tool_instance(
+                tool_name,
+                CapabilityLevel::CodeSearch,
+                CountingSkillTool { calls: Arc::clone(&tool_calls) },
+            )
+            .with_network_access(ToolNetworkAccess::Local),
+        )
         .await
         .expect("register tool");
     registry.allow_all_tools().await.expect("allow tools");
@@ -1338,11 +1347,14 @@ async fn skill_executor_continues_after_stop_response_with_tool_calls() {
     let tool_name = "stop_finish_reason_skill_test_tool";
     let tool_calls = Arc::new(Mutex::new(0usize));
     registry
-        .register_tool(ToolRegistration::from_tool_instance(
-            tool_name,
-            CapabilityLevel::CodeSearch,
-            CountingSkillTool { calls: Arc::clone(&tool_calls) },
-        ))
+        .register_tool(
+            ToolRegistration::from_tool_instance(
+                tool_name,
+                CapabilityLevel::CodeSearch,
+                CountingSkillTool { calls: Arc::clone(&tool_calls) },
+            )
+            .with_network_access(ToolNetworkAccess::Local),
+        )
         .await
         .expect("register tool");
     registry.allow_all_tools().await.expect("allow tools");
@@ -1416,11 +1428,14 @@ async fn skill_executor_blocks_registered_tool_outside_filtered_scope() {
     let tool_name = "skill_out_of_scope_test_tool";
     let tool_calls = Arc::new(Mutex::new(0usize));
     registry
-        .register_tool(ToolRegistration::from_tool_instance(
-            tool_name,
-            CapabilityLevel::CodeSearch,
-            CountingSkillTool { calls: Arc::clone(&tool_calls) },
-        ))
+        .register_tool(
+            ToolRegistration::from_tool_instance(
+                tool_name,
+                CapabilityLevel::CodeSearch,
+                CountingSkillTool { calls: Arc::clone(&tool_calls) },
+            )
+            .with_network_access(ToolNetworkAccess::Local),
+        )
         .await
         .expect("register tool");
     registry.allow_all_tools().await.expect("allow tools");
@@ -1460,11 +1475,14 @@ async fn skill_executor_skips_repeated_tool_call_and_finalizes() {
     let tool_name = "skill_loop_test_tool";
     let tool_calls = Arc::new(Mutex::new(0usize));
     registry
-        .register_tool(ToolRegistration::from_tool_instance(
-            tool_name,
-            CapabilityLevel::CodeSearch,
-            CountingSkillTool { calls: Arc::clone(&tool_calls) },
-        ))
+        .register_tool(
+            ToolRegistration::from_tool_instance(
+                tool_name,
+                CapabilityLevel::CodeSearch,
+                CountingSkillTool { calls: Arc::clone(&tool_calls) },
+            )
+            .with_network_access(ToolNetworkAccess::Local),
+        )
         .await
         .expect("register tool");
     registry.allow_all_tools().await.expect("allow tools");
@@ -1508,11 +1526,14 @@ async fn skill_executor_forces_final_synthesis_after_max_iterations() {
     for index in 0..MAX_SKILL_LLM_ITERATIONS {
         let tool_name = format!("skill_iteration_test_tool_{index}");
         registry
-            .register_tool(ToolRegistration::from_tool_instance(
-                tool_name.as_str(),
-                CapabilityLevel::CodeSearch,
-                CountingSkillTool { calls: Arc::clone(&tool_calls) },
-            ))
+            .register_tool(
+                ToolRegistration::from_tool_instance(
+                    tool_name.as_str(),
+                    CapabilityLevel::CodeSearch,
+                    CountingSkillTool { calls: Arc::clone(&tool_calls) },
+                )
+                .with_network_access(ToolNetworkAccess::Local),
+            )
             .await
             .unwrap_or_else(|error| panic!("register tool {tool_name}: {error}"));
         available_tools.push(ToolDefinition::function(

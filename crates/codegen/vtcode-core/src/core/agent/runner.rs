@@ -130,6 +130,7 @@ pub struct AgentRunner {
     tool_definitions_override: RwLock<Option<Vec<uni_provider::ToolDefinition>>>,
     /// Optional argument transformer applied before tool validation/execution.
     tool_arg_transform: Option<ToolArgTransform>,
+    local_tools_only: bool,
     /// Active primary-agent policy to intersect with runner tools.
     active_primary_agent: Option<ActivePrimaryAgent>,
 }
@@ -379,6 +380,7 @@ impl AgentRunner {
             steering_receiver: Mutex::new(steering_receiver),
             tool_definitions_override: RwLock::new(None),
             tool_arg_transform: None,
+            local_tools_only: false,
             active_primary_agent: None,
         })
     }
@@ -472,6 +474,11 @@ impl AgentRunner {
     /// Set an argument transformer applied to tool calls before validation and execution.
     pub fn set_tool_arg_transform(&mut self, transform: ToolArgTransform) {
         self.tool_arg_transform = Some(transform);
+    }
+
+    /// Restrict skill child execution using live trusted registration metadata.
+    pub fn restrict_to_local_tools(&mut self) {
+        self.local_tools_only = true;
     }
 
     /// Clear any previously set tool argument transformer.

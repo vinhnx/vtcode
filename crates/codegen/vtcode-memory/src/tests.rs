@@ -1,6 +1,7 @@
 //! Tests for the unified session store.
 
 use std::fs;
+use std::sync::Arc;
 
 use tempfile::TempDir;
 use vtcode_exec_events::{
@@ -11,7 +12,9 @@ use vtcode_exec_events::{
 use crate::event_log::{DEFAULT_MAX_EVENTS, SessionEventLog};
 use crate::migration::migrate_legacy;
 use crate::query::{query_facts, recent_sessions};
-use crate::{open, retention::apply_retention, sessions_root};
+use crate::{
+    EvictionSummaryHook, SessionStoreError, open, open_with_eviction_summary, retention::apply_retention, sessions_root,
+};
 
 fn sample_turn() -> Vec<ThreadEvent> {
     vec![
@@ -103,6 +106,40 @@ fn flushing_mid_turn_persists_buffered_metadata_for_reopen() {
     assert_eq!(reopened.event_count(), 2);
     assert_eq!(reopened.turn_count(), 0);
     assert_eq!(reopened.reconstruct_turn(1).expect("reconstruct open turn").len(), 1);
+}
+
+#[test]
+fn reopening_after_drop_scans_bytes_flushed_without_metadata() {
+    let dir = TempDir::new().expect("tempdir");
+    {
+        let log = open(dir.path(), "sess-drop-flush", DEFAULT_MAX_EVENTS).expect("open");
+        log.append(&ThreadEvent::ThreadStarted(ThreadStartedEvent { thread_id: "thread".to_string() }))
+            .expect("append thread event");
+        // Drop performs a best-effort byte flush but deliberately leaves the
+        // manifest untouched, so reopen must detect the stale file length.
+    }
+
+    let reopened = open(dir.path(), "sess-drop-flush", DEFAULT_MAX_EVENTS).expect("reopen");
+    assert_eq!(reopened.event_count(), 1);
+}
+
+#[test]
+fn reopening_mid_turn_preserves_state_for_completion() {
+    let dir = TempDir::new().expect("tempdir");
+    {
+        let log = open(dir.path(), "sess-mid-turn-resume", DEFAULT_MAX_EVENTS).expect("open");
+        log.append(&ThreadEvent::TurnStarted(TurnStartedEvent::default()))
+            .expect("append turn start");
+        log.flush().expect("flush mid-turn event log");
+    }
+
+    let reopened = open(dir.path(), "sess-mid-turn-resume", DEFAULT_MAX_EVENTS).expect("reopen");
+    reopened
+        .append(&ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }))
+        .expect("append turn completion");
+
+    assert_eq!(reopened.turn_count(), 1);
+    assert_eq!(reopened.reconstruct_turn(1).expect("reconstruct completed turn").len(), 2);
 }
 
 #[test]
@@ -429,6 +466,117 @@ fn stale_turn_index_offsets_fall_back_to_event_log_scan() {
 }
 
 #[test]
+fn current_manifest_rejects_a_stale_but_well_formed_turn_index() {
+    let dir = TempDir::new().expect("tempdir");
+    let session_id = "sess-stale-valid-index";
+    let session_dir = sessions_root(dir.path()).join(session_id);
+    let index_path = session_dir.join("index/turns.json");
+    let log = open(dir.path(), session_id, DEFAULT_MAX_EVENTS).expect("open");
+    for event in [
+        ThreadEvent::TurnStarted(TurnStartedEvent::default()),
+        ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }),
+    ] {
+        log.append(&event).expect("append first turn");
+    }
+    log.flush().expect("flush first turn");
+    let first_turn_index = fs::read(&index_path).expect("read first index");
+    for event in [
+        ThreadEvent::TurnStarted(TurnStartedEvent::default()),
+        ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }),
+    ] {
+        log.append(&event).expect("append second turn");
+    }
+    log.flush().expect("flush second turn");
+    drop(log);
+
+    // A crash after manifest.json was published but before turns.json would
+    // leave exactly this pairing: the current file length and manifest with a
+    // shorter, still structurally valid index.
+    let mut current_index: serde_json::Value =
+        serde_json::from_slice(&fs::read(&index_path).expect("read current index")).expect("parse current index");
+    let first_index: serde_json::Value = serde_json::from_slice(&first_turn_index).expect("parse first index");
+    let second_entry = current_index["entries"][1].clone();
+    current_index["entries"] = serde_json::json!([first_index["entries"][0].clone()]);
+    fs::write(&index_path, serde_json::to_vec(&current_index).expect("serialize stale index"))
+        .expect("write stale index");
+
+    let reopened = open(dir.path(), session_id, DEFAULT_MAX_EVENTS).expect("recover from stale index");
+    assert_eq!(reopened.turn_count(), 2);
+    assert_eq!(reopened.reconstruct_turn(1).expect("first turn").len(), 2);
+    assert_eq!(reopened.reconstruct_turn(2).expect("second turn").len(), 2);
+
+    // An index containing only turn 2 is also structurally valid, but its
+    // first ordinal does not match the manifest's retained base. It must be
+    // rejected and rebuilt so turn 1 remains addressable.
+    drop(reopened);
+    current_index["entries"] = serde_json::json!([second_entry]);
+    fs::write(&index_path, serde_json::to_vec(&current_index).expect("serialize offset index"))
+        .expect("write offset index");
+
+    let reopened = open(dir.path(), session_id, DEFAULT_MAX_EVENTS).expect("recover from offset index");
+    assert_eq!(reopened.turn_count(), 2);
+    assert_eq!(reopened.reconstruct_turn(1).expect("rebuilt first turn").len(), 2);
+    assert_eq!(reopened.reconstruct_turn(2).expect("rebuilt second turn").len(), 2);
+}
+
+#[test]
+fn legacy_manifest_uses_valid_index_base_when_scanning() {
+    let dir = TempDir::new().expect("tempdir");
+    let session_id = "sess-legacy-index-base";
+    let session_dir = sessions_root(dir.path()).join(session_id);
+    let events_path = session_dir.join("events.jsonl");
+    let index_path = session_dir.join("index/turns.json");
+    {
+        let log = open(dir.path(), session_id, 0).expect("open");
+        for _ in 0..3 {
+            log.append(&ThreadEvent::TurnStarted(TurnStartedEvent::default()))
+                .expect("append turn start");
+            log.append(&ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }))
+                .expect("append turn completion");
+        }
+        log.flush().expect("flush");
+    }
+
+    let bytes = fs::read(&events_path).expect("read event log");
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&fs::read(&index_path).expect("read turn index")).expect("parse turn index");
+    let third_entry = index["entries"][2].clone();
+    let third_start = third_entry["start_offset"].as_u64().expect("third turn start");
+    let third_end = third_entry["end_offset"].as_u64().expect("third turn end");
+    let retained_len = third_end.saturating_sub(third_start);
+    fs::write(
+        &events_path,
+        &bytes[usize::try_from(third_start).expect("offset fits")..usize::try_from(third_end).expect("offset fits")],
+    )
+    .expect("write retained turn");
+
+    // Legacy manifests did not persist `retained_turn_base` or `in_turn`.
+    // Keep a structurally valid, rebased index so the scan must recover the
+    // first retained ordinal from that index instead of restarting at turn 1.
+    index["entries"] = serde_json::json!([{
+        "turn_number": third_entry["turn_number"],
+        "start_offset": 0,
+        "end_offset": retained_len,
+        "event_count": third_entry["event_count"],
+        "ts": third_entry["ts"],
+    }]);
+    fs::write(&index_path, serde_json::to_vec(&index).expect("serialize legacy index")).expect("write legacy index");
+    let manifest_path = session_dir.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest")).expect("parse manifest");
+    manifest.as_object_mut().expect("manifest object").remove("retained_turn_base");
+    manifest.as_object_mut().expect("manifest object").remove("in_turn");
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).expect("serialize legacy manifest"))
+        .expect("write legacy manifest");
+
+    let reopened = open(dir.path(), session_id, 0).expect("reopen legacy session");
+    assert_eq!(reopened.turn_count(), 3);
+    assert!(reopened.reconstruct_turn(1).is_err(), "evicted ordinals must stay absent");
+    assert!(reopened.reconstruct_turn(2).is_err(), "evicted ordinals must stay absent");
+    assert_eq!(reopened.reconstruct_turn(3).expect("retained turn").len(), 2);
+}
+
+#[test]
 fn cap_rewrite_keeps_event_log_appendable_and_reopenable() {
     let dir = TempDir::new().expect("tempdir");
     let log = open(dir.path(), "sess-cap-rewrite", 2).expect("open");
@@ -445,12 +593,248 @@ fn cap_rewrite_keeps_event_log_appendable_and_reopenable() {
 
     let events_path = sessions_root(dir.path()).join("sess-cap-rewrite/events.jsonl");
     assert_eq!(fs::read_to_string(&events_path).expect("read compacted log").lines().count(), 2);
+    let summaries: Vec<_> = fs::read_dir(sessions_root(dir.path()).join("sess-cap-rewrite/derived"))
+        .expect("read summaries")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("eviction-summary-"))
+        .collect();
+    assert!(!summaries.is_empty(), "evicted history must have a persisted summary");
     assert_eq!(log.reconstruct_turn(2).expect("reconstruct retained turn").len(), 2);
 
     drop(log);
     let reopened = open(dir.path(), "sess-cap-rewrite", 2).expect("reopen compacted log");
     assert_eq!(reopened.event_count(), 2);
     assert_eq!(reopened.reconstruct_turn(2).expect("reconstruct after reopen").len(), 2);
+}
+
+#[test]
+fn cap_eviction_counts_session_records_removed_with_oldest_turn() {
+    let dir = TempDir::new().expect("tempdir");
+    let log = open(dir.path(), "sess-cap-session-record", 2).expect("open");
+    log.append(&ThreadEvent::ThreadStarted(ThreadStartedEvent { thread_id: "thread".to_string() }))
+        .expect("append thread start");
+    for _ in 0..2 {
+        log.append(&ThreadEvent::TurnStarted(TurnStartedEvent::default()))
+            .expect("append turn start");
+        log.append(&ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }))
+            .expect("append turn completion");
+    }
+
+    assert_eq!(log.event_count(), 2, "eviction count must include thread.started in the removed prefix");
+    assert_eq!(
+        fs::read_to_string(sessions_root(dir.path()).join("sess-cap-session-record/events.jsonl"))
+            .expect("read compacted event log")
+            .lines()
+            .count(),
+        2
+    );
+    assert!(log.reconstruct_turn(1).is_err(), "oldest turn must be evicted");
+    assert_eq!(log.reconstruct_turn(2).expect("retained turn").len(), 2);
+}
+
+#[test]
+fn scan_after_cap_rewrite_crash_preserves_retained_turn_ordinals() {
+    let dir = TempDir::new().expect("tempdir");
+    let events_path = sessions_root(dir.path()).join("sess-cap-crash/events.jsonl");
+    {
+        let log = open(dir.path(), "sess-cap-crash", 0).expect("open");
+        for _ in 0..3 {
+            log.append(&ThreadEvent::TurnStarted(TurnStartedEvent::default()))
+                .expect("append turn start");
+            log.append(&ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }))
+                .expect("append turn completion");
+        }
+        log.flush().expect("flush before simulated rewrite");
+    }
+
+    // Simulate a process dying after the atomic event-file replacement but
+    // before the shortened manifest and index are published. The stale index
+    // still contains the original offsets and ordinals, which the reopen path
+    // must use to recover the first retained turn number.
+    let index_path = sessions_root(dir.path()).join("sess-cap-crash/index/turns.json");
+    let index: serde_json::Value =
+        serde_json::from_slice(&fs::read(&index_path).expect("read turn index")).expect("parse turn index");
+    let truncate_offset = index["entries"][0]["end_offset"].as_u64().expect("first turn end offset");
+    let bytes = fs::read(&events_path).expect("read event log");
+    fs::write(&events_path, &bytes[usize::try_from(truncate_offset).expect("offset fits")..])
+        .expect("simulate shortened event log");
+
+    let reopened = open(dir.path(), "sess-cap-crash", 0).expect("reopen after simulated crash");
+    assert_eq!(reopened.turn_count(), 3);
+    assert!(reopened.reconstruct_turn(1).is_err(), "evicted ordinal must stay absent");
+    assert_eq!(reopened.reconstruct_turn(2).expect("retained turn 2").len(), 2);
+    assert_eq!(reopened.reconstruct_turn(3).expect("retained turn 3").len(), 2);
+}
+
+#[test]
+fn scan_after_full_cap_rewrite_crash_preserves_next_turn_ordinal() {
+    let dir = TempDir::new().expect("tempdir");
+    let events_path = sessions_root(dir.path()).join("sess-cap-crash-empty/events.jsonl");
+    {
+        let log = open(dir.path(), "sess-cap-crash-empty", 0).expect("open");
+        for event in [
+            ThreadEvent::TurnStarted(TurnStartedEvent::default()),
+            ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }),
+        ] {
+            log.append(&event).expect("append");
+        }
+        log.flush().expect("flush before simulated rewrite");
+    }
+
+    // Simulate the atomic replacement after every indexed turn was evicted,
+    // before the shortened manifest was published. The stale manifest still
+    // carries the last observed turn count and must seed the next ordinal.
+    fs::write(&events_path, []).expect("simulate empty rewritten event log");
+
+    let reopened = open(dir.path(), "sess-cap-crash-empty", 0).expect("reopen after simulated crash");
+    assert_eq!(reopened.turn_count(), 1);
+    reopened
+        .append(&ThreadEvent::TurnStarted(TurnStartedEvent::default()))
+        .expect("append next turn start");
+    reopened
+        .append(&ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }))
+        .expect("append next turn completion");
+    assert_eq!(reopened.turn_count(), 2);
+    assert_eq!(reopened.reconstruct_turn(2).expect("reconstruct next turn").len(), 2);
+}
+
+#[test]
+fn pending_cap_rewrite_recovers_when_index_is_missing() {
+    let dir = TempDir::new().expect("tempdir");
+    let session_id = "sess-cap-crash-missing-index";
+    let session_dir = sessions_root(dir.path()).join(session_id);
+    let events_path = session_dir.join("events.jsonl");
+    {
+        let log = open(dir.path(), session_id, 0).expect("open");
+        for _ in 0..3 {
+            log.append(&ThreadEvent::TurnStarted(TurnStartedEvent::default()))
+                .expect("append turn start");
+            log.append(&ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }))
+                .expect("append turn completion");
+        }
+        log.flush().expect("flush before simulated rewrite");
+    }
+
+    let index_path = session_dir.join("index/turns.json");
+    let index: serde_json::Value =
+        serde_json::from_slice(&fs::read(&index_path).expect("read turn index")).expect("parse turn index");
+    let truncate_offset = index["entries"][0]["end_offset"].as_u64().expect("first turn end offset");
+    let bytes = fs::read(&events_path).expect("read event log");
+    let new_file_len = bytes
+        .len()
+        .saturating_sub(usize::try_from(truncate_offset).expect("offset fits"));
+    fs::write(
+        session_dir.join("index/pending-cap-rewrite.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "previous_file_len": bytes.len(),
+            "new_file_len": new_file_len,
+            "retained_turn_base": 2,
+        }))
+        .expect("serialize rewrite marker"),
+    )
+    .expect("write rewrite marker");
+    fs::write(&events_path, &bytes[usize::try_from(truncate_offset).expect("offset fits")..])
+        .expect("simulate shortened event log");
+    fs::remove_file(index_path).expect("remove stale index");
+
+    let reopened = open(dir.path(), session_id, 0).expect("reopen after simulated crash");
+    assert_eq!(reopened.turn_count(), 3);
+    assert!(reopened.reconstruct_turn(1).is_err(), "evicted ordinal must stay absent");
+    assert_eq!(reopened.reconstruct_turn(2).expect("retained turn 2").len(), 2);
+    assert_eq!(reopened.reconstruct_turn(3).expect("retained turn 3").len(), 2);
+    assert!(!session_dir.join("index/pending-cap-rewrite.json").exists());
+}
+
+#[test]
+fn pending_cap_rewrite_recovers_when_index_is_invalid() {
+    let dir = TempDir::new().expect("tempdir");
+    let session_id = "sess-cap-crash-invalid-index";
+    let session_dir = sessions_root(dir.path()).join(session_id);
+    let events_path = session_dir.join("events.jsonl");
+    {
+        let log = open(dir.path(), session_id, 0).expect("open");
+        for _ in 0..3 {
+            log.append(&ThreadEvent::TurnStarted(TurnStartedEvent::default()))
+                .expect("append turn start");
+            log.append(&ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }))
+                .expect("append turn completion");
+        }
+        log.flush().expect("flush before simulated rewrite");
+    }
+
+    let index_path = session_dir.join("index/turns.json");
+    let index: serde_json::Value =
+        serde_json::from_slice(&fs::read(&index_path).expect("read turn index")).expect("parse turn index");
+    let truncate_offset = index["entries"][0]["end_offset"].as_u64().expect("first turn end offset");
+    let bytes = fs::read(&events_path).expect("read event log");
+    let new_file_len = bytes
+        .len()
+        .saturating_sub(usize::try_from(truncate_offset).expect("offset fits"));
+    fs::write(
+        session_dir.join("index/pending-cap-rewrite.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "previous_file_len": bytes.len(),
+            "new_file_len": new_file_len,
+            "retained_turn_base": 2,
+        }))
+        .expect("serialize rewrite marker"),
+    )
+    .expect("write rewrite marker");
+    fs::write(&events_path, &bytes[usize::try_from(truncate_offset).expect("offset fits")..])
+        .expect("simulate shortened event log");
+    fs::write(index_path, b"{invalid index").expect("corrupt stale index");
+
+    let reopened = open(dir.path(), session_id, 0).expect("reopen after simulated crash");
+    assert_eq!(reopened.turn_count(), 3);
+    assert!(reopened.reconstruct_turn(1).is_err(), "evicted ordinal must stay absent");
+    assert_eq!(reopened.reconstruct_turn(2).expect("retained turn 2").len(), 2);
+    assert_eq!(reopened.reconstruct_turn(3).expect("retained turn 3").len(), 2);
+    assert!(!session_dir.join("index/pending-cap-rewrite.json").exists());
+}
+
+#[test]
+fn multiple_open_handles_share_turn_state_and_file_lock() {
+    let dir = TempDir::new().expect("tempdir");
+    let first = open(dir.path(), "sess-shared-handles", 0).expect("open first handle");
+    let second = open(dir.path(), "sess-shared-handles", 0).expect("open second handle");
+
+    for event in [
+        ThreadEvent::TurnStarted(TurnStartedEvent::default()),
+        ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }),
+    ] {
+        first.append(&event).expect("append first turn");
+    }
+    for event in [
+        ThreadEvent::TurnStarted(TurnStartedEvent::default()),
+        ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }),
+    ] {
+        second.append(&event).expect("append second turn");
+    }
+
+    assert_eq!(first.turn_count(), 2);
+    assert_eq!(second.turn_count(), 2);
+    assert_eq!(first.reconstruct_turn(1).expect("first turn").len(), 2);
+    assert_eq!(second.reconstruct_turn(2).expect("second turn").len(), 2);
+}
+
+#[test]
+fn failed_eviction_summary_keeps_canonical_events() {
+    let dir = TempDir::new().expect("tempdir");
+    let hook: EvictionSummaryHook =
+        Arc::new(|_| Err(SessionStoreError::io("summary", std::io::Error::other("summary backend unavailable"))));
+    let log = open_with_eviction_summary(dir.path(), "sess-summary-failure", 2, hook).expect("open");
+    for event in [
+        ThreadEvent::TurnStarted(TurnStartedEvent::default()),
+        ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }),
+        ThreadEvent::TurnStarted(TurnStartedEvent::default()),
+    ] {
+        let _ = log.append(&event);
+    }
+    let error = log.append(&ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: Usage::default() }));
+    assert!(error.is_err());
+    let events_path = sessions_root(dir.path()).join("sess-summary-failure/events.jsonl");
+    assert_eq!(fs::read_to_string(events_path).expect("read canonical log").lines().count(), 4);
+    assert_eq!(log.event_count(), 4);
 }
 
 #[cfg(unix)]
@@ -510,7 +894,7 @@ fn scan_skips_malformed_lifecycle_payloads() {
     let mut lines = vec![
         r#"{"schema_version":"0.11.0","event":{"type":"thread.started","thread_id":123}}"#.to_string(),
         r#"{"schema_version":"0.11.0","event":{"type":"turn.started","token_breakdown":"invalid"}}"#.to_string(),
-        r#"{"schema_version":"0.11.0","event":{"type":"turn.completed","usage":{}}}"#.to_string(),
+        r#"{"schema_version":"0.11.0","event":{"type":"turn.completed","usage":"invalid"}}"#.to_string(),
     ];
     lines.extend(
         valid_events

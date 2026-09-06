@@ -129,6 +129,23 @@ fn enforce_tool_capabilities_keeps_apply_patch_for_supported_models() {
 }
 
 #[test]
+fn effective_context_size_uses_catalog_capacity_for_known_routes() {
+    let provider = OpenRouterProvider::with_model("test-key".to_string(), "meta/muse-spark-1.2".to_string());
+
+    assert_eq!(provider.effective_context_size("meta/muse-spark-1.2"), 1_048_576);
+    assert_eq!(provider.effective_context_size("unlisted-route"), 128_000);
+}
+
+#[test]
+fn catalog_reasoning_capabilities_are_available_without_model_overrides() {
+    let provider = OpenRouterProvider::with_model("test-key".to_string(), "meta/muse-spark-1.2".to_string());
+
+    assert!(provider.supports_reasoning("meta/muse-spark-1.2"));
+    assert!(!provider.supports_reasoning_effort("meta/muse-spark-1.2"));
+    assert!(provider.supported_reasoning_efforts("meta/muse-spark-1.2").is_empty());
+}
+
+#[test]
 fn test_parse_stream_payload_chat_chunk() {
     let payload = json!({
         "choices": [{

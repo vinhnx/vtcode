@@ -26,4 +26,9 @@ impl ModelId {
     pub fn supports_reasoning_effort(&self) -> bool {
         self.provider().supports_reasoning_effort(&self.as_str())
     }
+
+    /// Whether this model exposes structured reasoning output.
+    pub fn supports_reasoning(&self) -> bool {
+        self.provider().supports_reasoning(&self.as_str())
+    }
 }

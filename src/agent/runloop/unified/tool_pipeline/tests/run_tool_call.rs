@@ -1104,7 +1104,7 @@ async fn test_run_tool_call_rejects_escalated_shell_when_hitl_disabled() {
 }
 
 #[tokio::test]
-async fn test_run_tool_call_allows_escalated_shell_with_saved_prefix_rule() {
+async fn test_run_tool_call_requires_operator_preapproval_for_escalated_shell() {
     let mut test_ctx = TestContext::new().await;
     let mut registry = test_ctx.registry;
 
@@ -1171,8 +1171,10 @@ async fn test_run_tool_call_allows_escalated_shell_with_saved_prefix_rule() {
             .expect("run_tool_call must run");
 
     match outcome.status {
-        ToolExecutionStatus::Success { .. } => {}
-        other => panic!("Expected saved prefix approval to allow execution, got: {other:?}"),
+        ToolExecutionStatus::Failure { error } => {
+            assert!(error.to_string().contains("requires an enforced operator approval decision"));
+        }
+        other => panic!("Expected operator preapproval denial, got: {other:?}"),
     }
 }
 

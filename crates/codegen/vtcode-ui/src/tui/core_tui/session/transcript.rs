@@ -15,6 +15,7 @@ pub(super) struct TranscriptScrollAnchor {
 #[derive(Default, Clone)]
 pub struct CachedMessage {
     pub revision: u64,
+    valid: bool,
     pub lines: Vec<TranscriptLine>,
 }
 
@@ -47,7 +48,7 @@ impl TranscriptReflowCache {
     pub fn invalidate_content(&mut self) {
         for message in &mut self.messages {
             message.lines.clear(); // Clear cached lines
-            message.revision = 0; // Mark as invalid
+            message.valid = false;
         }
     }
 
@@ -58,7 +59,7 @@ impl TranscriptReflowCache {
         }
 
         let cached = &self.messages[index];
-        cached.revision != current_revision
+        !cached.valid || cached.revision != current_revision
     }
 
     /// Invalidates one cached message without dropping unrelated transcript
@@ -66,7 +67,7 @@ impl TranscriptReflowCache {
     /// line that has not changed the group's head revision.
     pub(crate) fn invalidate_message(&mut self, index: usize) {
         if let Some(message) = self.messages.get_mut(index) {
-            message.revision = 0;
+            message.valid = false;
         }
     }
 
@@ -79,6 +80,7 @@ impl TranscriptReflowCache {
 
         let message = &mut self.messages[index];
         message.revision = revision;
+        message.valid = true;
         message.lines = lines;
     }
 
@@ -332,6 +334,21 @@ impl Default for TranscriptReflowCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_revision_zero_remains_invalid_after_resize_or_invalidation() {
+        let mut cache = TranscriptReflowCache::new(80);
+        cache.update_message(0, 0, Vec::new());
+        assert!(!cache.needs_reflow(0, 0));
+        cache.set_width(40);
+        assert!(cache.needs_reflow(0, 0));
+        cache.update_message(0, 0, Vec::new());
+        cache.invalidate_message(0);
+        assert!(cache.needs_reflow(0, 0));
+        cache.update_message(0, u64::MAX, Vec::new());
+        assert!(cache.needs_reflow(0, 0));
+    }
+
     use ratatui::text::Line;
     use std::sync::Arc;
 

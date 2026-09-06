@@ -200,10 +200,12 @@ default `true`) and is **unified across both runloops**: the core `AgentRunner`
 loop and the binary unified runloop both delegate to the shared
 `vtcode_core::compaction` orchestrator (`auto_compact_messages`) rather than
 maintaining separate compaction logic. It fires at the effective session
-ceiling: an explicit `agent.harness.auto_compaction_threshold_tokens` wins,
-otherwise VT Code applies the 90% ratio to the smaller of the provider's hard
-context capacity and `context.max_context_tokens` (160,000 by default).
-Explicit thresholds remain capped by the provider capacity.
+ceiling: resolved model capacity bounded by the provider route and a positive
+`context.max_context_tokens` safety ceiling, with room reserved for the next
+response. The default ceiling is zero (automatic); known request output limits
+are reserved, falling back to 4,096 tokens when unavailable. An explicit
+`agent.harness.auto_compaction_threshold_tokens` can lower this trigger but
+cannot bypass either the safety ceiling or output reservation.
 Disabling normal auto-compaction does not disable the single bounded recovery
 compaction used after a provider rejects a follow-up that follows successful
 tool output; that safety path preserves the current request and completed tool
@@ -218,9 +220,10 @@ To preserve conversational continuity, every compacted history keeps:
 - the structured **session memory envelope** injected at the boundary (see
   Resume and fork continuity).
 
-The soft compaction threshold is 90% of the effective hard threshold. Reaching
-it marks compaction pending and defers the work to the next outer turn
-boundary. The hard threshold compacts before the next model request. No hidden
+The runloop derives a soft scheduling boundary from the effective prompt
+threshold. Reaching it marks compaction pending and defers the work to the next
+outer turn boundary. The effective prompt threshold compacts before the next model
+request. No hidden
 summary model call is issued in the middle of an active tool loop.
 
 If a transient provider failure follows successful tool execution, the unified

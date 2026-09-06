@@ -55,6 +55,7 @@ pub async fn run_acp_agent(config: &CoreAgentConfig, vt_cfg: &VTCodeConfig, titl
     let tools_config = vt_cfg.tools.clone();
     let commands_config = vt_cfg.commands.clone();
     let credential_storage_mode = vt_cfg.agent.credential_storage_mode;
+    let allow_reasoning_effort_downgrade = vt_cfg.agent.allow_reasoning_effort_downgrade;
     let discovered = discover_subagents(&SubagentDiscoveryInput::new(config.workspace.clone()))
         .context("Failed to discover primary agents for ACP bridge")?;
     let primary_agents =
@@ -71,6 +72,7 @@ pub async fn run_acp_agent(config: &CoreAgentConfig, vt_cfg: &VTCodeConfig, titl
             let commands_config_clone = commands_config.clone();
             let agent = ZedAgent::new(
                 config_clone,
+                allow_reasoning_effort_downgrade,
                 credential_storage_mode,
                 zed_config_clone,
                 tools_config_clone,

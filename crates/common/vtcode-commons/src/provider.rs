@@ -310,7 +310,7 @@ impl FromStr for Provider {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "gemini" => Ok(Provider::Gemini),
+            "gemini" | "google" => Ok(Provider::Gemini),
             "openai" => Ok(Provider::OpenAI),
             "anthropic" => Ok(Provider::Anthropic),
             "copilot" => Ok(Provider::Copilot),

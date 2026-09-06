@@ -1,9 +1,18 @@
-/// Input management for terminal sessions
-///
-/// Encapsulates user input state, including text editing, cursor movement,
-/// and command history navigation.  Text editing and cursor positioning are
-/// delegated to [`ratatui_textarea::TextArea`], which provides undo/redo,
-/// proper UTF-8 handling, and a battle-tested editing model.
+//! Input management for terminal sessions
+//!
+//! Encapsulates user input state, including text editing, cursor movement,
+//! and command history navigation.  Text editing and cursor positioning are
+//! delegated to [`ratatui_textarea::TextArea`], which provides undo/redo,
+//! proper UTF-8 handling, and a battle-tested editing model.
+
+/// Exclusive destination for composer input in the core session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputOwner {
+    Composer,
+    Overlay,
+    Runtime,
+}
+
 use std::collections::HashSet;
 use std::ops::Range;
 

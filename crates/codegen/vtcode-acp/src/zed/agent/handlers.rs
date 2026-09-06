@@ -357,10 +357,30 @@ async fn run_prompt(agent: Arc<ZedAgent>, args: PromptRequest) -> Result<PromptR
     .map_err(|err| SdkError::internal_error().data(err.to_string()))?;
 
     let supports_streaming = provider.supports_streaming();
-    let reasoning_effort = if provider.supports_reasoning_effort(&session_model) {
-        Some(session_reasoning_effort)
-    } else {
+    let reasoning_effort = if session_reasoning_effort == vtcode_core::config::types::ReasoningEffortLevel::None {
         None
+    } else {
+        let mapping = vtcode_core::llm::reasoning_effort::ReasoningEffortMapper::resolve(
+            provider.as_ref(),
+            &session_model,
+            session_reasoning_effort,
+            agent.allow_reasoning_effort_downgrade,
+        )
+        .map_err(|error| {
+            SdkError::invalid_params().data(json!({
+                "reason": "unsupported_reasoning_effort",
+                "detail": error.to_string(),
+            }))
+        })?;
+        if mapping.degraded() {
+            warn!(
+                requested = %mapping.requested,
+                effective = %mapping.effective,
+                model = %session_model,
+                "ACP reasoning effort explicitly downgraded"
+            );
+        }
+        Some(mapping.effective)
     };
 
     let mut stop_reason = acp::StopReason::EndTurn;

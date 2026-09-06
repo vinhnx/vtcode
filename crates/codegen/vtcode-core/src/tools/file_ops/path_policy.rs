@@ -95,15 +95,27 @@ impl FileOpsTool {
         let normalized_root = normalize_path(&self.workspace_root);
         let canonical_root = normalize_path(self.canonical_workspace_root());
 
-        if !normalized.starts_with(&normalized_root) && !normalized.starts_with(&canonical_root) {
-            return Err(anyhow!("Error: Path '{original_display}' resolves outside the workspace."));
+        let lexical_in_workspace = normalized.starts_with(&normalized_root);
+        let lexical_in_canonical_workspace = normalized.starts_with(&canonical_root);
+
+        // Callers may retain a path through an equivalent filesystem alias
+        // (for example `/var` versus macOS's `/private/var`) after the
+        // registry has canonicalized its workspace root. Resolve that alias
+        // before applying containment; an outside path still fails the
+        // canonical-root check below.
+        if !lexical_in_workspace && !lexical_in_canonical_workspace {
+            let canonical = self.canonicalize_allow_missing(&normalized).await?;
+            if !canonical.starts_with(&canonical_root) {
+                return Err(anyhow!("Error: Path '{original_display}' resolves outside the workspace."));
+            }
+            return Ok(canonical);
         }
 
         // Symlink-aware containment: validate every path component so a
         // symlink committed inside the workspace cannot resolve outside it.
         // The lexical tier above gives precise error messages for plain
         // traversal; this tier closes the escape-by-symlink case.
-        if normalized.starts_with(&normalized_root) {
+        if lexical_in_workspace {
             vtcode_commons::paths::ensure_path_within_workspace_resolved(&normalized, &self.workspace_root)
                 .await
                 .with_context(|| format!("Error: Path '{original_display}' is not accessible inside the workspace"))?;

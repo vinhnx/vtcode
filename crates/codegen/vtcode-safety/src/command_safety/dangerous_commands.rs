@@ -17,6 +17,13 @@
 /// Checks if a command appears dangerous to execute.
 /// Returns true if the command should be blocked before execution.
 pub fn command_might_be_dangerous(command: &[String]) -> bool {
+    // PowerShell's encoded-command form hides the script from every
+    // platform-neutral parser. Treat it as dangerous before policy or shell
+    // evaluation can classify the base64 payload as an ordinary argument.
+    if is_encoded_powershell_invocation(command) {
+        return true;
+    }
+
     #[cfg(windows)]
     {
         if crate::command_safety::windows::is_dangerous_command_windows(command) {
@@ -45,6 +52,20 @@ pub fn command_might_be_dangerous(command: &[String]) -> bool {
     }
 
     false
+}
+
+fn is_encoded_powershell_invocation(command: &[String]) -> bool {
+    let Some(executable) = command.first() else {
+        return false;
+    };
+    let executable = extract_command_name(executable).to_ascii_lowercase();
+    if !matches!(executable.as_str(), "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe") {
+        return false;
+    }
+
+    command.iter().skip(1).any(|argument| {
+        matches!(argument.to_ascii_lowercase().as_str(), "-encodedcommand" | "-encoded" | "-enc" | "-e")
+    })
 }
 
 /// Git global options that take a value (skip these and their values when finding subcommand)

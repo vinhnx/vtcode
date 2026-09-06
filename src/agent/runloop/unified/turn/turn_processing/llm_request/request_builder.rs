@@ -140,21 +140,23 @@ pub(super) async fn build_turn_request(
         None
     };
     let reasoning_effort = reasoning_effort
-        .and_then(|requested| {
-            vtcode_core::llm::reasoning_effort::ReasoningEffortMapper::resolve_or_omit(
+        .map(|requested| {
+            vtcode_core::llm::reasoning_effort::ReasoningEffortMapper::resolve(
                 ctx.provider_client.as_ref(),
                 request_model,
                 requested,
                 ctx.vt_cfg.is_some_and(|cfg| cfg.agent.allow_reasoning_effort_downgrade),
             )
         })
+        .transpose()?
         .map(|mapping| {
             if mapping.degraded() {
                 tracing::warn!(requested = %mapping.requested, effective = %mapping.effective,
                 model = request_model, "Harness reasoning effort explicitly downgraded");
             }
             mapping.effective
-        });
+        })
+        .filter(|effort| *effort != ReasoningEffortLevel::None);
     let reasoning_active = reasoning_effort
         .is_some_and(|effort| !matches!(effort, ReasoningEffortLevel::None | ReasoningEffortLevel::Unknown));
     let primary_agent_context = render_primary_agent_runtime_context(
@@ -228,13 +230,13 @@ pub(super) async fn build_turn_request(
     };
     let few_shot_context = prompt_output.few_shot_context.take();
     let assembled_prefix_hash = stable_system_prefix_hash(&prompt_output.system_prompt);
-    let capability_prefix_hash = vtcode_core::core::agent::hash_utils::PromptCapabilityIdentity::resolve(
+    let capability_identity = vtcode_core::core::agent::hash_utils::PromptCapabilityIdentity::resolve(
         ctx.provider_client.as_ref(),
         request_model,
         reasoning_effort,
         prompt_output.tool_snapshot.epoch,
-    )
-    .prefix_hash(assembled_prefix_hash);
+    );
+    let capability_digest = capability_identity.digest();
     let envelope_mode = format!(
         "planning={};full_auto={};tool_free={};request_user_input={}",
         turn_snapshot.planning_active,
@@ -249,7 +251,7 @@ pub(super) async fn build_turn_request(
         prompt_output.system_prompt,
         selected_tools,
         assembled_prefix_hash,
-        capability_prefix_hash,
+        capability_digest,
     );
     let ordered_wire_tools = request_envelope.ordered_tools();
     let ordered_wire_tool_names: Vec<String> =

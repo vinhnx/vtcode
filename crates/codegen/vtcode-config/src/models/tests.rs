@@ -218,7 +218,7 @@ fn test_model_variants() {
 #[test]
 fn test_preferred_lightweight_variant() {
     assert_eq!(ModelId::GPT56Sol.preferred_lightweight_variant(), Some(ModelId::GPT56Terra));
-    assert_eq!(ModelId::ClaudeSonnet5.preferred_lightweight_variant(), Some(ModelId::ClaudeSonnet5));
+    assert_eq!(ModelId::ClaudeSonnet5.preferred_lightweight_variant(), None);
     assert_eq!(ModelId::Gemini37Flash.preferred_lightweight_variant(), None);
     assert_eq!(ModelId::ZaiGlm52.preferred_lightweight_variant(), None);
     assert_eq!(ModelId::MetaMuseSpark12.preferred_lightweight_variant(), Some(ModelId::MetaMuseSpark11));
@@ -418,12 +418,32 @@ fn test_provider_local_helpers() {
 
 #[test]
 fn test_core_capability_helpers() {
-    assert_eq!(ModelId::DeepSeekV4Pro.non_reasoning_variant(), Some(ModelId::DeepSeekV4Flash));
+    assert_eq!(ModelId::DeepSeekV4Pro.non_reasoning_variant(), None);
+    assert_eq!(ModelId::XaiGrok46.non_reasoning_variant(), Some(ModelId::XaiGrokBuild01));
     assert!(ModelId::GPT56Sol.supports_shell_tool());
     assert!(ModelId::GPT56Sol.supports_shell_tool());
     assert!(!ModelId::GPT56Sol.supports_apply_patch_tool());
     assert!(Provider::XAI.supports_reasoning_effort(models::xai::GROK_4_6));
     assert!(ModelId::XaiGrok46.is_reasoning_variant());
+}
+
+#[test]
+fn catalog_reasoning_does_not_imply_configurable_effort() {
+    assert!(Provider::OpenRouter.supports_reasoning("meta/muse-spark-1.2"));
+    assert!(!Provider::OpenRouter.supports_reasoning_effort("meta/muse-spark-1.2"));
+    assert!(
+        Provider::OpenRouter
+            .supported_reasoning_efforts("meta/muse-spark-1.2")
+            .is_empty()
+    );
+}
+
+#[test]
+fn namespaced_evolink_models_use_upstream_catalog_metadata() {
+    let entry = model_catalog_entry("evolink", "evolink/deepseek-v4-pro").expect("Evolink catalog entry");
+    assert_eq!(entry.context_window, 163_840);
+    assert!(entry.reasoning);
+    assert_eq!(entry.reasoning_efforts, &["low", "medium", "high"]);
 }
 
 #[test]
@@ -702,4 +722,35 @@ fn from_config_rejects_custom_model_for_unrelated_provider() {
 fn from_config_falls_through_to_catalog_for_known_models() {
     let parsed = ModelId::from_config("gpt-5.6-sol", "openai", &Default::default(), &[]).unwrap();
     assert_eq!(parsed, ModelId::GPT56Sol);
+}
+
+#[test]
+fn catalog_fallbacks_preserve_provider_and_are_acyclic() {
+    for model in ModelId::all_models() {
+        let mut seen = vec![model.clone()];
+        let mut current = model.clone();
+        while let Some(next) = current.preferred_lightweight_variant() {
+            assert_eq!(next.provider(), model.provider());
+            assert!(!seen.contains(&next), "fallback cycle for {model}");
+            seen.push(next.clone());
+            current = next;
+        }
+    }
+}
+
+#[test]
+fn missing_catalog_routes_have_no_speculative_fallback_or_tier() {
+    for model in [
+        ModelId::CopilotGPT52Codex,
+        ModelId::CopilotGPT54,
+        ModelId::CopilotClaudeSonnet46,
+        ModelId::EvolinkDeepseekV4Pro,
+        ModelId::MoonshotKimiK3,
+        ModelId::MoonshotKimiK27Code,
+        ModelId::PoolsideLagunaM1,
+        ModelId::PoolsideLagunaS21,
+    ] {
+        assert!(!model.is_pro_variant(), "{model}");
+        assert!(model.preferred_lightweight_variant().is_none(), "{model}");
+    }
 }

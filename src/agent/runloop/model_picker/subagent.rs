@@ -12,6 +12,7 @@ use anyhow::{Result, anyhow};
 use vtcode_config::VTCodeConfig;
 use vtcode_core::config::models::ModelId;
 use vtcode_core::config::types::ReasoningEffortLevel;
+use vtcode_core::llm::ModelResolver;
 use vtcode_core::ui::{InlineListSearchConfig, InlineListSelection};
 use vtcode_core::utils::ansi::{AnsiRenderer, MessageStyle};
 use vtcode_ui::tui::app::{
@@ -25,7 +26,6 @@ use super::rendering::{
 };
 use super::selection::{
     SelectionDetail, parse_model_selection, reasoning_level_description, reasoning_level_label, selection_from_option,
-    supports_max_reasoning, supports_xhigh_reasoning,
 };
 use crate::agent::runloop::unified::overlay_prompt::{OverlayWaitOutcome, wait_for_overlay_submission};
 use crate::agent::runloop::unified::state::CtrlCState;
@@ -515,19 +515,41 @@ pub(super) fn subagent_reasoning_levels(model: &str, supports_reasoning: bool) -
         return Vec::new();
     }
 
-    let mut levels = vec![
-        ReasoningEffortLevel::None,
-        ReasoningEffortLevel::Minimal,
-        ReasoningEffortLevel::Low,
-        ReasoningEffortLevel::Medium,
-        ReasoningEffortLevel::High,
-    ];
-    if !is_subagent_shortcut(model) && supports_xhigh_reasoning(model) {
-        levels.push(ReasoningEffortLevel::XHigh);
+    let mut levels = vec![ReasoningEffortLevel::None];
+    if let Some(resolved) = ModelResolver::resolve(None, model, &[], None) {
+        levels.extend(
+            resolved
+                .supported_reasoning_efforts()
+                .iter()
+                .filter_map(|level| ReasoningEffortLevel::parse(level)),
+        );
+    } else {
+        // Shortcut aliases and unlisted custom routes retain the historical
+        // generic effort contract until their concrete provider is resolved.
+        levels.extend([
+            ReasoningEffortLevel::Low,
+            ReasoningEffortLevel::Medium,
+            ReasoningEffortLevel::High,
+        ]);
     }
-    if !is_subagent_shortcut(model) && supports_max_reasoning(model) {
-        levels.push(ReasoningEffortLevel::Max);
+    if levels.len() == 1 && is_subagent_shortcut(model) {
+        levels.extend([
+            ReasoningEffortLevel::Low,
+            ReasoningEffortLevel::Medium,
+            ReasoningEffortLevel::High,
+        ]);
     }
+    levels.sort_unstable_by_key(|level| match level {
+        ReasoningEffortLevel::None => 0,
+        ReasoningEffortLevel::Minimal => 1,
+        ReasoningEffortLevel::Low => 2,
+        ReasoningEffortLevel::Medium => 3,
+        ReasoningEffortLevel::High => 4,
+        ReasoningEffortLevel::XHigh => 5,
+        ReasoningEffortLevel::Max => 6,
+        ReasoningEffortLevel::Unknown => usize::MAX,
+    });
+    levels.dedup();
     levels
 }
 
@@ -536,18 +558,10 @@ fn subagent_supports_reasoning_level(target: &SubagentModelTarget, level: Reason
         return false;
     }
 
-    match level {
-        ReasoningEffortLevel::None
-        | ReasoningEffortLevel::Unknown
-        | ReasoningEffortLevel::Minimal
-        | ReasoningEffortLevel::Low
-        | ReasoningEffortLevel::Medium
-        | ReasoningEffortLevel::High => true,
-        ReasoningEffortLevel::XHigh => {
-            !is_subagent_shortcut(target.model()) && supports_xhigh_reasoning(target.model())
-        }
-        ReasoningEffortLevel::Max => !is_subagent_shortcut(target.model()) && supports_max_reasoning(target.model()),
+    if level == ReasoningEffortLevel::Unknown {
+        return false;
     }
+    subagent_reasoning_levels(target.model(), true).contains(&level)
 }
 
 async fn wait_for_inline_list_selection(

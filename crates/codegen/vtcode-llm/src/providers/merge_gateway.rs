@@ -1499,25 +1499,10 @@ impl LLMProvider for MergeGatewayProvider {
     }
 
     fn effective_context_size(&self, model: &str) -> usize {
-        match model {
-            models::merge_gateway::OPENAI_GPT_5_5
-            | models::merge_gateway::OPENAI_GPT_5_6_LUNA
-            | models::merge_gateway::OPENAI_GPT_5_6_SOL
-            | models::merge_gateway::OPENAI_GPT_5_6_TERRA => 1_100_000,
-            models::merge_gateway::OPENAI_GPT_6_ASTRA => 1_050_000,
-            models::merge_gateway::ANTHROPIC_CLAUDE_OPUS_5
-            | models::merge_gateway::GOOGLE_GEMINI_3_6_FLASH
-            | models::merge_gateway::GOOGLE_GEMINI_3_7_FLASH
-            | models::merge_gateway::DEEPSEEK_V4_PRO_0813
-            | models::merge_gateway::DEEPSEEK_V4_FLASH_0731
-            | models::merge_gateway::QWEN_3_8_MAX
-            | models::merge_gateway::MOONSHOT_KIMI_K3
-            | models::merge_gateway::THINKINGMACHINES_INKLING
-            | models::merge_gateway::META_MUSE_SPARK_1_1 => 1_000_000,
-            models::merge_gateway::XAI_GROK_4_6 => 500_000,
-            models::merge_gateway::MINIMAX_H3 => 131_000,
-            _ => 128_000,
-        }
+        vtcode_config::models::model_catalog_entry(MergeGatewaySpec::KEY, model)
+            .map(|entry| entry.context_window)
+            .filter(|capacity| *capacity > 0)
+            .unwrap_or(128_000)
     }
 }
 

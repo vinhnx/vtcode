@@ -177,21 +177,20 @@ impl ToolRegistry {
 
             for tool in &tools {
                 let canonical_name = format!("mcp::{}::{}", tool.provider, tool.name);
-                if seen_tools.insert(canonical_name.clone()) {
-                    let registration = build_mcp_registration(Arc::clone(&mcp_client), &tool.provider, tool, None);
-
-                    if let Err(err) = self.inventory.register_tool(registration) {
-                        warn!(
-                            tool = %tool.name,
-                            provider = %tool.provider,
-                            error = %err,
-                            "failed to register MCP proxy tool"
-                        );
-                    }
+                if !seen_tools.insert(canonical_name) {
+                    continue;
                 }
-            }
-
-            for tool in tools {
+                let registration = match build_mcp_registration(Arc::clone(&mcp_client), &tool.provider, tool, None) {
+                    Ok(registration) => registration,
+                    Err(error) => {
+                        warn!(%error, "Rejected MCP proxy metadata");
+                        continue;
+                    }
+                };
+                if let Err(error) = self.inventory.register_tool(registration) {
+                    warn!(%error, "Failed to register MCP proxy tool");
+                    continue;
+                }
                 provider_map.entry(tool.provider.clone()).or_default().push(tool.name.clone());
             }
 

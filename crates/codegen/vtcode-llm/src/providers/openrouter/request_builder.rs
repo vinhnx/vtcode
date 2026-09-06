@@ -133,15 +133,12 @@ impl OpenRouterProvider {
             provider_request["parallel_tool_calls"] = Value::Bool(parallel);
         }
 
-        if let Some(effort) = request.reasoning_effort
-            && self.supports_reasoning_effort(resolved_model)
-        {
-            if let Some(payload) =
-                RigProviderCapabilities::new(Provider::OpenRouter, resolved_model).reasoning_parameters(effort)
+        if let Some(effort) = request.reasoning_effort {
+            let supported = self.supported_reasoning_efforts(resolved_model);
+            if let Some(payload) = RigProviderCapabilities::new(Provider::OpenRouter, resolved_model)
+                .reasoning_parameters_for_supported_efforts(effort, supported)?
             {
                 provider_request["reasoning"] = payload;
-            } else {
-                provider_request["reasoning"] = json!({ "effort": effort.as_str() });
             }
         }
 
@@ -190,6 +187,50 @@ mod tests {
         let messages = payload["messages"].as_array().expect("messages should be present");
 
         assert_eq!(messages[0]["content"], json!("<think>trace</think>done"));
+    }
+
+    #[test]
+    fn openrouter_custom_reasoning_capability_preserves_requested_effort() {
+        use vtcode_config::core::ModelConfig;
+
+        let mut model_behavior = ModelConfig::default();
+        model_behavior.model_supports_reasoning_effort = Some(true);
+        let provider = OpenRouterProvider::from_config(
+            Some("test-key".to_owned()),
+            Some("custom-route".to_owned()),
+            None,
+            None,
+            None,
+            None,
+            Some(model_behavior),
+        );
+        let request = LLMRequest {
+            model: "custom-route".to_owned(),
+            messages: vec![Message::user("hello".to_owned())].into(),
+            reasoning_effort: Some(vtcode_config::types::ReasoningEffortLevel::High),
+            ..Default::default()
+        };
+
+        let payload = provider
+            .convert_to_openrouter_format(&request)
+            .expect("custom capability should validate");
+        assert_eq!(payload["reasoning"]["effort"], json!("high"));
+    }
+
+    #[test]
+    fn openrouter_rejects_unsupported_reasoning_instead_of_dropping_it() {
+        let provider = OpenRouterProvider::new("test-key".to_string());
+        let request = LLMRequest {
+            model: "unknown-route".to_owned(),
+            messages: vec![Message::user("hello".to_owned())].into(),
+            reasoning_effort: Some(vtcode_config::types::ReasoningEffortLevel::High),
+            ..Default::default()
+        };
+
+        let error = provider
+            .convert_to_openrouter_format(&request)
+            .expect_err("unsupported reasoning must block the request");
+        assert!(error.to_string().contains("unsupported"));
     }
 
     #[test]

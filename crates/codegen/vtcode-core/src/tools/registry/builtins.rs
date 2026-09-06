@@ -49,6 +49,7 @@ pub(super) fn builtin_tool_registrations(
         .iter()
         .map(|factory| factory(planning_workflow_state))
         .map(with_builtin_behavior)
+        .map(with_builtin_network_access)
         .map(|registration| registration.with_catalog_source(ToolCatalogSource::Builtin))
         .collect();
 
@@ -560,6 +561,21 @@ fn with_builtin_behavior(registration: ToolRegistration) -> ToolRegistration {
     } else {
         registration
     }
+}
+
+fn with_builtin_network_access(registration: ToolRegistration) -> ToolRegistration {
+    use super::ToolNetworkAccess;
+    let access = match registration.name() {
+        "web_fetch" | "web_search" | "defuddle_fetch" | "exec_command" | "exec_pty_cmd" | "write_stdin"
+        | "run_pty_cmd" | "send_pty_input" | "create_pty_session" | "mcp" | "agent" | "cron" => {
+            ToolNetworkAccess::Network
+        }
+        "read_file" | "list_files" | "write_file" | "edit_file" | "apply_patch" | "code_search"
+        | "request_user_input" | "memory" | "start_planning" | "task_tracker" | "search_tools" | "read_pty_session"
+        | "list_pty_sessions" | "close_pty_session" | "get_errors" => ToolNetworkAccess::Local,
+        _ => ToolNetworkAccess::Unknown,
+    };
+    registration.with_network_access(access)
 }
 
 #[cfg(test)]

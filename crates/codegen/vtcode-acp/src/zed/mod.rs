@@ -101,6 +101,7 @@ mod tests {
 
         ZedAgent::new(
             core_config,
+            false,
             AuthCredentialsStoreMode::default(),
             zed_config,
             tools_config,

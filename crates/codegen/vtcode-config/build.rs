@@ -72,7 +72,7 @@ fn generate_placeholder_artifacts() {
     }
     if let Err(error) = fs::write(
         out_dir.join("model_capabilities.rs"),
-        "// Placeholder for docs.rs build\n#[derive(Clone, Copy)]\npub struct Pricing {\n    pub input: Option<f64>,\n    pub output: Option<f64>,\n    pub cache_read: Option<f64>,\n    pub cache_write: Option<f64>,\n}\n\n#[derive(Clone, Copy)]\npub struct Entry {\n    pub provider: &'static str,\n    pub id: &'static str,\n    pub display_name: &'static str,\n    pub description: &'static str,\n    pub context_window: usize,\n    pub max_output_tokens: Option<usize>,\n    pub reasoning_efforts: &'static [&'static str],\n    pub is_pro: bool,\n    pub lightweight_model: Option<&'static str>,\n    pub reasoning: bool,\n    pub tool_call: bool,\n    pub vision: bool,\n    pub input_modalities: &'static [&'static str],\n    pub caching: bool,\n    pub structured_output: bool,\n    pub pricing: Pricing,\n}\n\npub const ENTRIES: &[Entry] = &[];\npub const PROVIDERS: &[&str] = &[];\n\npub fn metadata_for(_provider: &str, _id: &str) -> Option<Entry> { None }\npub fn models_for_provider(_provider: &str) -> Option<&'static [&'static str]> { None }\n",
+        "// Placeholder for docs.rs build\n#[derive(Clone, Copy)]\npub struct Pricing {\n    pub input: Option<f64>,\n    pub output: Option<f64>,\n    pub cache_read: Option<f64>,\n    pub cache_write: Option<f64>,\n}\n\n#[derive(Clone, Copy)]\npub struct Entry {\n    pub provider: &'static str,\n    pub id: &'static str,\n    pub display_name: &'static str,\n    pub description: &'static str,\n    pub context_window: usize,\n    pub max_output_tokens: Option<usize>,\n    pub reasoning_efforts: &'static [&'static str],\n    pub is_pro: bool,\n    pub lightweight_model: Option<&'static str>,\n    pub reasoning: bool,\n    pub tool_call: bool,\n    pub vision: bool,\n    pub input_modalities: &'static [&'static str],\n    pub caching: bool,\n    pub structured_output: bool,\n    pub supports_sampling: bool,\n    pub supports_logprobs: bool,\n    pub prompt_cache_ttl: Option<&'static str>,\n    pub prompt_contract: Option<&'static str>,\n    pub pricing: Pricing,\n}\n\npub const ENTRIES: &[Entry] = &[];\npub const PROVIDERS: &[&str] = &[];\n\npub fn metadata_for(_provider: &str, _id: &str) -> Option<Entry> { None }\npub fn models_for_provider(_provider: &str) -> Option<&'static [&'static str]> { None }\n",
     ) {
         eprintln!("warning: failed to write capability metadata: {error}");
     }
@@ -310,6 +310,18 @@ struct CapabilityModelSpec {
     capabilities: CapabilityFlags,
     #[serde(default)]
     cost: Option<PricingSpec>,
+    #[serde(default = "default_true")]
+    supports_sampling: bool,
+    #[serde(default = "default_true")]
+    supports_logprobs: bool,
+    #[serde(default)]
+    prompt_cache_ttl: Option<String>,
+    #[serde(default)]
+    prompt_contract: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Default, Deserialize)]
@@ -356,6 +368,10 @@ struct CapabilityEntry {
     input_modalities: Vec<String>,
     caching: bool,
     structured_output: bool,
+    supports_sampling: bool,
+    supports_logprobs: bool,
+    prompt_cache_ttl: Option<String>,
+    prompt_contract: Option<String>,
     pricing: PricingSpec,
 }
 
@@ -434,6 +450,10 @@ fn load_model_capability_entries(manifest_dir: &Path) -> Result<Vec<CapabilityEn
                 vision,
                 caching: spec.capabilities.caching || spec.capabilities.context_caching,
                 structured_output: spec.capabilities.structured_output,
+                supports_sampling: spec.supports_sampling,
+                supports_logprobs: spec.supports_logprobs,
+                prompt_cache_ttl: spec.prompt_cache_ttl,
+                prompt_contract: spec.prompt_contract,
                 pricing: spec.cost.unwrap_or_default(),
             });
         }

@@ -98,7 +98,7 @@ pub(crate) mod terminal_io;
 mod terminal_modes;
 
 use drive::{DriveRuntimeOptions, drive_terminal};
-use events::{EventListener, TerminalEvent, spawn_event_loop};
+use events::{EventListener, EventSender, TerminalEvent, spawn_event_loop};
 use signal::SignalCleanupGuard;
 use surface::TerminalSurface;
 use terminal_io::{drain_terminal_events, finalize_terminal, prepare_terminal};
@@ -112,7 +112,7 @@ use terminal_modes::{TerminalModeState, enable_terminal_modes, restore_terminal_
 pub(super) struct EventStreamController {
     cancellation_token: CancellationToken,
     join_handle: Option<tokio::task::JoinHandle<()>>,
-    event_tx: UnboundedSender<TerminalEvent>,
+    event_tx: EventSender,
     rx_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     last_input_elapsed_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
     session_start: std::time::Instant,
@@ -122,7 +122,7 @@ impl EventStreamController {
     fn new(
         cancellation_token: CancellationToken,
         join_handle: tokio::task::JoinHandle<()>,
-        event_tx: UnboundedSender<TerminalEvent>,
+        event_tx: EventSender,
         rx_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
         last_input_elapsed_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
         session_start: std::time::Instant,

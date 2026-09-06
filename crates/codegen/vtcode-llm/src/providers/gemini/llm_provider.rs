@@ -38,13 +38,14 @@ impl LLMProvider for GeminiProvider {
     }
 
     fn effective_context_size(&self, model: &str) -> usize {
-        if model.contains("gemini-3.1") {
+        let fallback = if model.contains("gemini-3.1") {
             1_048_576
         } else if model.contains("3") || model.contains("1.5-pro") {
             2_097_152
         } else {
             1_048_576
-        }
+        };
+        crate::provider::catalog_context_window("gemini", model, fallback)
     }
 
     async fn generate(&self, request: LLMRequest) -> Result<LLMResponse, LLMError> {

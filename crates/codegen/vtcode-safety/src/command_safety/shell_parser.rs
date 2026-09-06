@@ -22,6 +22,8 @@
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
+use anyhow::Result;
+
 /// Lazy-initialized tree-sitter bash parser (wrapped in Mutex for mutation)
 static BASH_PARSER: OnceLock<Result<Mutex<tree_sitter::Parser>, String>> = OnceLock::new();
 
@@ -183,6 +185,55 @@ pub fn has_only_output_redirections(script: &str) -> bool {
         return false;
     }
     saw_redirection
+}
+
+/// Validate literal file-redirection targets before command classification drops them.
+/// Descriptor routing carries no path; unresolved shell expansion fails closed.
+pub(crate) fn validate_redirection_paths(script: &str) -> Result<()> {
+    use anyhow::{Context, anyhow, ensure};
+    if !script.contains(['<', '>']) {
+        return Ok(());
+    }
+    let parser = get_bash_parser().map_err(anyhow::Error::msg)?;
+    let mut parser = parser.lock().map_err(|error| anyhow!("shell parser lock poisoned: {error}"))?;
+    let tree = parser.parse(script, None).context("failed to parse shell redirections")?;
+    ensure!(!tree.root_node().has_error(), "cannot validate malformed shell redirections");
+    let mut pending = vec![tree.root_node()];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "file_redirect" {
+            let text = node.utf8_text(script.as_bytes()).context("invalid shell redirection text")?;
+            let operator = text.trim_start_matches(|character: char| character.is_ascii_digit());
+            let descriptor_route = operator.starts_with(">&") || operator.starts_with("<&");
+            let mut cursor = node.walk();
+            let destinations = node.children_by_field_name("destination", &mut cursor);
+            for destination in destinations {
+                let raw = destination
+                    .utf8_text(script.as_bytes())
+                    .context("invalid redirection destination")?;
+                ensure!(!contains_dynamic_shell_syntax(raw), "dynamic redirection destination is not allowed");
+                let words = shell_words::split(raw).context("invalid quoted redirection destination")?;
+                ensure!(words.len() == 1, "redirection destination must be one literal path");
+                let path = words.first().context("missing redirection destination")?;
+                if descriptor_route && (path == "-" || path.chars().all(|character| character.is_ascii_digit())) {
+                    continue;
+                }
+                // `sh` expands a leading `~` after validation, so treating it
+                // as a relative literal would let a redirection escape the
+                // workspace (for example, `> ~/.config`). Require callers to
+                // provide an explicit, policy-checked destination instead.
+                ensure!(!path.starts_with('~'), "home-directory redirection destinations are not allowed");
+                // The null sink is the one intentional device path used by normal commands.
+                if path == "/dev/null" {
+                    continue;
+                }
+                vtcode_commons::paths::validate_path_safety(path)
+                    .with_context(|| format!("unsafe shell redirection destination: {path}"))?;
+            }
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    Ok(())
 }
 
 fn contains_background_operator(script: &str) -> bool {
@@ -645,7 +696,7 @@ mod tests {
 
 // === Injection detection (moved from tools::validation::commands) ===
 
-use anyhow::{Result, bail};
+use anyhow::bail;
 
 /// Quote state for shell segment splitting.
 #[derive(Clone, Copy, Eq, PartialEq)]

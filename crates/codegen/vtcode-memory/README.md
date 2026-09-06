@@ -21,7 +21,11 @@ Each session is persisted under `.vtcode/sessions/<session_id>/`:
   eliminating the redundant `.vtcode/checkpoints`, `.vtcode/logs`, and
   `.vtcode/history` stores.
 - **Bounded growth.** `apply_retention` evicts the oldest/stale sessions so disk
-  overhead does not accumulate across a long-lived agent.
+  overhead does not accumulate across a long-lived agent. Event-cap eviction
+  persists a derived summary before replacing the canonical log and retains
+  events when that summary cannot be persisted.
+- **Deterministic search.** Cross-session memory search ranks tokenized facts with
+  BM25 (`k1=1.2`, `b=0.75`) and invalidates its manifest LRU after atomic writes.
 - **Crash-safe + private.** Event compaction and metadata writes are atomic;
   session directories and artifacts use private permissions.
 

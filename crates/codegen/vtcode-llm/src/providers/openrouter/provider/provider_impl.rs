@@ -24,23 +24,32 @@ impl LLMProvider for OpenRouterProvider {
         true
     }
 
-    fn supports_reasoning(&self, _model: &str) -> bool {
+    fn supports_reasoning(&self, model: &str) -> bool {
         self.model_behavior
             .as_ref()
             .and_then(|b| b.model_supports_reasoning)
+            .or_else(|| vtcode_config::models::model_catalog_entry("openrouter", model).map(|entry| entry.reasoning))
             .unwrap_or(false)
     }
 
-    fn supports_reasoning_effort(&self, _model: &str) -> bool {
+    fn supports_reasoning_effort(&self, model: &str) -> bool {
         self.model_behavior
             .as_ref()
             .and_then(|b| b.model_supports_reasoning_effort)
+            .or_else(|| {
+                vtcode_config::models::model_catalog_entry("openrouter", model)
+                    .map(|entry| !entry.reasoning_efforts.is_empty())
+            })
             .unwrap_or(false)
     }
 
     fn supports_tools(&self, model: &str) -> bool {
         use vtcode_config::constants::models;
         !models::openrouter::TOOL_UNAVAILABLE_MODELS.contains(&model)
+    }
+
+    fn effective_context_size(&self, model: &str) -> usize {
+        crate::provider::catalog_context_window("openrouter", model, 128_000)
     }
 
     async fn generate(&self, request: LLMRequest) -> Result<LLMResponse, LLMError> {

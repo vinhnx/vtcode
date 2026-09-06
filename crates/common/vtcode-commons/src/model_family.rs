@@ -63,7 +63,9 @@ pub struct ModelFamily {
     /// Maximum supported context window, if known
     context_window: Option<i64>,
 
-    /// Token threshold for automatic compaction
+    /// Optional legacy token threshold for automatic compaction. Runtime
+    /// compaction uses the resolved provider/session budget instead of
+    /// deriving a percentage from `context_window`.
     auto_compact_token_limit: Option<i64>,
 
     /// Whether the model supports reasoning summaries
@@ -138,15 +140,9 @@ impl ModelFamily {
         }
     }
 
-    /// Get the auto-compact token limit, computing a default if not set
+    /// Get the explicitly configured legacy auto-compact token limit.
     fn auto_compact_token_limit(&self) -> Option<i64> {
         self.auto_compact_token_limit
-            .or(self.context_window.map(Self::default_auto_compact_limit))
-    }
-
-    /// Compute the default auto-compact limit (90% of context window)
-    const fn default_auto_compact_limit(context_window: i64) -> i64 {
-        (context_window * 9) / 10
     }
 
     /// Get the model slug
@@ -420,9 +416,16 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_compact_limit() {
+    fn test_auto_compact_limit_requires_explicit_value() {
         let family = ModelFamily {
             context_window: Some(100_000),
+            ..Default::default()
+        };
+        assert_eq!(family.auto_compact_token_limit(), None);
+
+        let family = ModelFamily {
+            context_window: Some(100_000),
+            auto_compact_token_limit: Some(90_000),
             ..Default::default()
         };
         assert_eq!(family.auto_compact_token_limit(), Some(90_000));

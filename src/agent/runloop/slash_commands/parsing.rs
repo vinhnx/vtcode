@@ -309,6 +309,7 @@ mod tests {
                     max_output_tokens: Some(128),
                     reasoning_effort: Some(ReasoningEffortLevel::Minimal),
                     verbosity: Some(VerbosityLevel::High),
+                    ..ManualCompactionOptions::default()
                 },
                 native_only: true,
             }
@@ -330,6 +331,7 @@ mod tests {
                     max_output_tokens: Some(64),
                     reasoning_effort: Some(ReasoningEffortLevel::Minimal),
                     verbosity: Some(VerbosityLevel::High),
+                    ..ManualCompactionOptions::default()
                 },
                 native_only: false,
             }

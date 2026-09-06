@@ -29,7 +29,7 @@ async fn delete_file_tool_removes_file() {
 }
 
 #[tokio::test]
-async fn delete_file_tool_removes_directory_recursively() {
+async fn recursive_shell_delete_is_blocked_even_with_confirmation() {
     let tmp = tempfile::TempDir::new().unwrap();
     let dir_path = tmp.path().join("nested");
     let child_path = dir_path.join("file.txt");
@@ -40,15 +40,21 @@ async fn delete_file_tool_removes_directory_recursively() {
     registry.initialize_async().await.unwrap();
     registry.allow_all_tools().await.unwrap();
 
-    let val = registry
-        .execute_harness_command_session(json!({
-            "action": "run",
-            "command": "rm -rf nested",
-            "confirm": true
-        }))
+    let result = registry
+        .execute_tool(
+            tools::EXEC_COMMAND,
+            json!({
+                "cmd": "rm -rf nested",
+                "confirm": true,
+            }),
+        )
         .await
-        .unwrap();
+        .expect_err("recursive shell deletion must remain blocked by command policy");
 
-    assert_eq!(val.get("success").and_then(|v| v.as_bool()), Some(true));
-    assert!(!dir_path.exists());
+    assert!(
+        result.to_string().contains("not permitted")
+            || result.to_string().contains("blocked")
+            || result.to_string().contains("Potential dangerous command detected")
+    );
+    assert!(dir_path.exists(), "blocked recursive shell deletion must not touch the workspace");
 }

@@ -29,6 +29,41 @@ pub struct PromptCapabilityIdentity {
 }
 
 impl PromptCapabilityIdentity {
+    /// Construct the cache identity available from the generated model catalog.
+    ///
+    /// The runtime provider path should prefer [`Self::resolve`], because it
+    /// can observe provider-specific capabilities such as parallel tool
+    /// configuration. Static prompt assembly does not own a provider object,
+    /// so it uses this catalog-only identity and keeps missing capability bits
+    /// explicit rather than falling back to a model-name hash.
+    #[must_use]
+    pub fn from_catalog(
+        provider: &str,
+        model: &str,
+        reasoning: Option<crate::config::types::ReasoningEffortLevel>,
+        catalog_epoch: u64,
+        catalog: Option<vtcode_config::models::ModelCatalogEntry>,
+    ) -> Self {
+        let context_window = catalog.map(|entry| entry.context_window).unwrap_or_default();
+        let reasoning_effort = catalog.is_some_and(|entry| !entry.reasoning_efforts.is_empty());
+        let tools = catalog.map(|entry| entry.tool_call).unwrap_or(true);
+        let caching = catalog.is_some_and(|entry| entry.caching);
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+            context_window,
+            reasoning_tag: reasoning.map_or_else(|| "unset".into(), |effort| effort.to_string().into()),
+            reasoning_effort,
+            // Static prompt assembly has no provider instance from which to
+            // resolve this wire capability. Runtime request construction
+            // replaces this with the Provider-trait value.
+            parallel_tools: false,
+            tools,
+            caching,
+            catalog_epoch,
+        }
+    }
+
     /// Prefer discovery/catalog capacity when the caller already resolved a model.
     #[must_use]
     pub fn with_resolved_model(mut self, resolved: &crate::llm::model_resolver::ResolvedModel) -> Self {
@@ -47,7 +82,7 @@ impl PromptCapabilityIdentity {
             model: model.into(),
             context_window: provider.effective_context_size(model),
             reasoning_tag: reasoning.map_or_else(|| "unset".into(), |effort| effort.to_string().into()),
-            reasoning_effort: provider.supports_reasoning_effort(model),
+            reasoning_effort: !provider.supported_reasoning_efforts(model).is_empty(),
             parallel_tools: provider.supports_parallel_tool_config(model),
             tools: provider.supports_tools(model),
             caching: provider.supports_context_caching(model),
@@ -58,6 +93,14 @@ impl PromptCapabilityIdentity {
     #[must_use]
     pub fn prefix_hash(&self, prompt_hash: u64) -> u64 {
         hash_value(&(prompt_hash, self))
+    }
+
+    /// Return the digest for the resolved capabilities alone. Callers that
+    /// also have a stable prompt hash can combine the two with
+    /// [`Self::prefix_hash`].
+    #[must_use]
+    pub fn digest(&self) -> u64 {
+        hash_value(self)
     }
 }
 
@@ -108,7 +151,7 @@ mod capability_tests {
                 PromptCapabilityIdentity::resolve(provider.as_ref(), model, Some(ReasoningEffortLevel::High), 1);
             assert_eq!(identity.context_window, provider.effective_context_size(model));
             assert_eq!(identity.parallel_tools, provider.supports_parallel_tool_config(model));
-            assert_eq!(identity.reasoning_effort, provider.supports_reasoning_effort(model));
+            assert_eq!(identity.reasoning_effort, !provider.supported_reasoning_efforts(model).is_empty());
             let repeat =
                 PromptCapabilityIdentity::resolve(provider.as_ref(), model, Some(ReasoningEffortLevel::High), 1);
             assert_eq!(identity.prefix_hash(7), repeat.prefix_hash(7));

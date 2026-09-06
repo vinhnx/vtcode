@@ -28,8 +28,8 @@ use crate::exec::events::HarnessEventKind;
 use crate::llm::provider::{Message, ToolCall, ToolChoice, ToolDefinition, supports_responses_chaining};
 use crate::llm::providers::gemini::wire::Part;
 use crate::prompts::{
-    PromptContext, RuntimePromptContract, append_runtime_mode_sections,
-    append_runtime_tool_prompt_sections_for_profile, upsert_harness_limits_section,
+    PromptContext, RuntimePromptContract, append_runtime_mode_sections, append_runtime_tool_prompt_sections_for_model,
+    upsert_harness_limits_section,
 };
 use crate::utils::colors::style;
 use anyhow::{Context, Result};
@@ -38,6 +38,7 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 pub(super) struct RuntimePromptBundle {
+    prompt_policy_hash: u64,
     request_envelope: crate::core::agent::request_envelope::SessionRequestEnvelope,
     tool_snapshot: SessionToolCatalogSnapshot,
     /// Estimated token overhead of `request_tools`, computed once per
@@ -66,6 +67,30 @@ enum AssessmentResolution {
 }
 
 impl AgentRunner {
+    fn runtime_prompt_policy_hash(&self) -> u64 {
+        let model = self.get_selected_model();
+        let cfg = self.config();
+        let identity = crate::core::agent::hash_utils::PromptCapabilityIdentity::resolve(
+            self.provider_client.as_ref(),
+            &model,
+            self.provider_client
+                .sampling_overrides(&model)
+                .reasoning_effort
+                .or(self.reasoning_effort),
+            0,
+        );
+        crate::core::agent::hash_utils::hash_value(&(
+            identity,
+            cfg.context.max_context_tokens,
+            cfg.agent.max_system_prompt_tokens,
+            cfg.agent.harness.max_budget_usd.map(f64::to_bits),
+            format!("{:?}", cfg.agent.shell_prompt_profile),
+            cfg.agent.harness.max_tool_calls_per_turn,
+            cfg.agent.harness.max_tool_wall_clock_secs,
+            cfg.agent.harness.max_tool_retries,
+        ))
+    }
+
     async fn compose_task_system_prompt(
         &self,
         prompt_tools: Arc<Vec<ToolDefinition>>,
@@ -94,7 +119,7 @@ impl AgentRunner {
         let tool_snapshot = self.build_universal_tool_snapshot().await?;
         let request_tools = tool_snapshot.snapshot.clone();
         let prompt_tools = request_tools.clone().unwrap_or_else(|| Arc::new(Vec::new()));
-        let (mut system_prompt, system_prompt_report) =
+        let (mut system_prompt, mut system_prompt_report) =
             self.compose_task_system_prompt(prompt_tools, is_simple_task).await?;
         self.append_active_primary_agent_context(&mut system_prompt);
 
@@ -117,7 +142,15 @@ impl AgentRunner {
             self.config().agent.harness.max_tool_retries,
         );
         let shell_profile = self.config().agent.shell_prompt_profile.resolve_for_current_platform();
-        append_runtime_tool_prompt_sections_for_profile(&mut system_prompt, &tool_snapshot, true, shell_profile);
+        append_runtime_tool_prompt_sections_for_model(
+            &mut system_prompt,
+            &tool_snapshot,
+            true,
+            shell_profile,
+            self.provider_client.as_ref(),
+            &self.get_selected_model(),
+            Some(self.config()),
+        );
 
         let tool_def_tokens = request_tools
             .as_deref()
@@ -130,13 +163,18 @@ impl AgentRunner {
         debug!(tool_def_tokens, tool_count, "tool definition overhead");
 
         let system_instruction_prefix_hash = stable_system_prefix_hash(&system_prompt);
-        let request_envelope = crate::core::agent::request_envelope::SessionRequestEnvelope::new(
+        system_prompt_report.token_estimate = crate::prompts::system::estimate_token_count(&system_prompt);
+        system_prompt_report.over_budget =
+            system_prompt_report.token_estimate > self.config().agent.max_system_prompt_tokens;
+        let request_envelope = crate::core::agent::request_envelope::SessionRequestEnvelope::with_prefix_hash(
             format!("{}-catalog-{}-{}", self.session_id, tool_snapshot.version, tool_snapshot.epoch),
             system_prompt,
             request_tools.as_deref().map_or_else(Vec::new, |tools| tools.clone()),
             system_instruction_prefix_hash,
+            system_instruction_prefix_hash,
         );
         Ok(RuntimePromptBundle {
+            prompt_policy_hash: self.runtime_prompt_policy_hash(),
             request_envelope,
             tool_snapshot,
             tool_def_tokens,
@@ -203,7 +241,9 @@ impl AgentRunner {
         is_simple_task: bool,
     ) -> Result<bool> {
         let current_version = self.tool_registry.tool_catalog_state().current_version();
-        if current_version == bundle.tool_snapshot.version {
+        if current_version == bundle.tool_snapshot.version
+            && self.runtime_prompt_policy_hash() == bundle.prompt_policy_hash
+        {
             return Ok(false);
         }
 
@@ -437,12 +477,14 @@ impl AgentRunner {
         let max_tool_loops = setup.max_tool_loops;
         let max_context_tokens = setup.max_context_tokens;
         let mut runtime = setup.runtime;
-        runtime.state.stats.provider_name = self.config().agent.provider.clone();
+        // Normalize usage from the provider actually serving this session;
+        // configuration may contain an alias (or be inferred from the model).
+        runtime.state.stats.provider_name = self.provider_client.name().to_string();
         let mut continuation_controller = setup.continuation_controller;
         let effective_task = setup.effective_task;
         let orchestration_enabled = setup.orchestration_enabled;
-        let mut cost_warning_emitted = false;
         let mut budget_warning_emitted = false;
+        let mut session_costs = crate::llm::usage_cost::SessionCostAccumulator::default();
         let max_budget_usd = setup.max_budget_usd;
         let max_revision_rounds = setup.max_revision_rounds;
         let mut revision_rounds_used = 0usize;
@@ -483,7 +525,36 @@ impl AgentRunner {
                 ));
 
                 let turn_model = self.get_selected_model();
+                self.refresh_runtime_prompt_bundle_if_catalog_changed(&mut prompt_bundle, is_simple_task)
+                    .await?;
                 let provider_name = self.provider_client.name().to_string();
+                if let Err(error) =
+                    crate::llm::usage_cost::require_budget_pricing(&provider_name, &turn_model, max_budget_usd)
+                {
+                    let message = error.to_string();
+                    event_recorder.turn_blocked(vtcode_exec_events::TurnBlockedEvent {
+                        message: message.clone(),
+                        last_tool: None,
+                        blocked_streak: 0,
+                        blocked_total: 0,
+                        consecutive_cap: 0,
+                        total_cap: 0,
+                        recovery_active: false,
+                        usage: Some(runtime.state.stats.total_usage.clone()),
+                    });
+                    should_write_blocked_handoff = true;
+                    runtime.state.outcome = TaskOutcome::failed(
+                        message,
+                        Vec::new(),
+                        Some(
+                            "Choose a model route with complete pricing or remove the USD budget explicitly"
+                                .to_string(),
+                        ),
+                        None,
+                    );
+                    break;
+                }
+
                 if std::env::var_os("VTCODE_DEBUG_PROVIDER").is_some() {
                     tracing::debug!(
                         provider_client = self.provider_client.name(),
@@ -492,7 +563,12 @@ impl AgentRunner {
                     );
                 }
                 let sampling_overrides = self.provider_client.sampling_overrides(&turn_model);
-                let turn_reasoning = if is_simple_task {
+                let turn_reasoning = if is_simple_task
+                    && self
+                        .provider_client
+                        .supported_reasoning_efforts(&turn_model)
+                        .contains(&ReasoningEffortLevel::Minimal.as_str())
+                {
                     Some(ReasoningEffortLevel::Minimal)
                 } else {
                     sampling_overrides.reasoning_effort.or(self.reasoning_effort)
@@ -556,9 +632,7 @@ impl AgentRunner {
                         .push(format!("Pre-flight check: {pct}% of context budget used before LLM call"));
                 }
 
-                let parallel_tool_config = if self.model.len() < 20 {
-                    None
-                } else if self.provider_client.supports_parallel_tool_config(&turn_model) {
+                let parallel_tool_config = if self.provider_client.supports_parallel_tool_config(&turn_model) {
                     Some(Box::new(crate::llm::provider::ParallelToolConfig::anthropic_optimized()))
                 } else {
                     None
@@ -600,22 +674,48 @@ impl AgentRunner {
                     runtime.state.last_processed_message_idx = runtime.state.conversation.len();
                 }
 
-                let reasoning_effort = turn_reasoning
-                    .and_then(|requested| {
-                        crate::llm::reasoning_effort::ReasoningEffortMapper::resolve_or_omit(
+                let reasoning_mapping = turn_reasoning
+                    .map(|requested| {
+                        crate::llm::reasoning_effort::ReasoningEffortMapper::resolve(
                             self.provider_client.as_ref(),
                             &turn_model,
                             requested,
                             self.config().agent.allow_reasoning_effort_downgrade,
                         )
                     })
-                    .map(|mapping| {
-                        if mapping.degraded() {
-                            tracing::warn!(requested = %mapping.requested, effective = %mapping.effective,
+                    .transpose();
+                let reasoning_effort = match reasoning_mapping {
+                    Ok(mapping) => mapping,
+                    Err(error) => {
+                        let message = error.to_string();
+                        event_recorder.turn_blocked(vtcode_exec_events::TurnBlockedEvent {
+                            message: message.clone(),
+                            last_tool: None,
+                            blocked_streak: 0,
+                            blocked_total: 0,
+                            consecutive_cap: 0,
+                            total_cap: 0,
+                            recovery_active: false,
+                            usage: Some(runtime.state.stats.total_usage.clone()),
+                        });
+                        should_write_blocked_handoff = true;
+                        runtime.state.outcome = TaskOutcome::failed(
+                            message,
+                            Vec::new(),
+                            Some("Choose a supported reasoning effort or explicitly enable downgrade".to_string()),
+                            None,
+                        );
+                        break;
+                    }
+                }
+                .map(|mapping| {
+                    if mapping.degraded() {
+                        tracing::warn!(requested = %mapping.requested, effective = %mapping.effective,
                             model = %turn_model, "Harness reasoning effort explicitly downgraded");
-                        }
-                        mapping.effective
-                    });
+                    }
+                    mapping.effective
+                })
+                .filter(|effort| *effort != ReasoningEffortLevel::None);
                 let reasoning_active = reasoning_effort.is_some_and(|effort| {
                     !matches!(effort, ReasoningEffortLevel::None | ReasoningEffortLevel::Unknown)
                 });
@@ -786,13 +886,13 @@ impl AgentRunner {
                         Arc::clone(&sent_messages),
                     );
                 }
-                match crate::llm::usage_cost::estimate_session_costs(
-                    self.config().agent.provider.as_str(),
-                    &turn_model,
-                    &runtime.state.stats.total_usage,
-                ) {
+                let turn_cost = response.usage.as_ref().and_then(|usage| {
+                    let normalized = crate::llm::usage_cost::normalized_turn_usage(&provider_name, usage);
+                    crate::llm::usage_cost::estimate_session_costs(&provider_name, &turn_model, &normalized)
+                });
+                match session_costs.record(turn_cost) {
                     Some(estimate) => {
-                        runtime.state.total_cost_usd = Some(estimate.raw_usd);
+                        runtime.state.total_cost_usd = Some(estimate.effective_usd);
                         let threshold = self.config().agent.harness.budget_warning_threshold;
                         match crate::llm::usage_cost::BudgetStatus::classify(
                             estimate.raw_usd,
@@ -824,17 +924,17 @@ impl AgentRunner {
                     }
                     None => {
                         runtime.state.total_cost_usd = None;
-                        if max_budget_usd.is_some() && !cost_warning_emitted {
-                            cost_warning_emitted = true;
-                            let warning_message = format!(
-                                "Budget enforcement disabled for model `{turn_model}` because pricing metadata is unavailable"
+                        if max_budget_usd.is_some() {
+                            runtime.state.outcome = TaskOutcome::failed(
+                                format!(
+                                    "Pricing or usage became unavailable for `{provider_name}/{turn_model}`; budget enforcement stopped execution"
+                                ),
+                                Vec::new(),
+                                Some("Select a model route with complete pricing".to_string()),
+                                None,
                             );
-                            warn!(
-                                provider = %self.config().agent.provider,
-                                model = %turn_model,
-                                "Budget enforcement disabled because pricing metadata is unavailable"
-                            );
-                            runtime.state.push_warning(warning_message);
+                            should_write_blocked_handoff = true;
+                            break;
                         }
                     }
                 }
@@ -1311,7 +1411,9 @@ impl AgentRunner {
                 runtime.state.outcome.is_success().then_some(summary.as_str()),
                 runtime.state.stop_reason.as_deref(),
                 total_usage,
-                runtime.state.total_cost_usd.and_then(serde_json::Number::from_f64),
+                session_costs
+                    .total()
+                    .and_then(|cost| serde_json::Number::from_f64(cost.effective_usd)),
                 runtime.state.stats.turns_executed,
             );
             let thread_events = event_recorder.take_events();

@@ -188,6 +188,10 @@ pub(crate) async fn build_summarized_fork_history(
         insert_memory_envelope_message(&mut source_history, envelope, MemoryEnvelopePlacement::Start);
     }
 
+    let context_budget = match vtcode_core::compaction::effective_context_budget(vt_cfg, provider, model) {
+        0 => None,
+        budget => Some(budget),
+    };
     let mut compacted = if prefer_saved_summary && source_envelope.is_some() {
         build_zero_cost_summarized_fork_history(
             &source_history,
@@ -196,11 +200,12 @@ pub(crate) async fn build_summarized_fork_history(
         )
     } else {
         let compaction_input = dedup_repeated_file_reads_for_local_compaction(&source_history);
-        vtcode_core::compaction::compact_history(
+        vtcode_core::compaction::compact_history_with_budget(
             provider,
             model,
             &compaction_input,
             &local_compaction_config(vt_cfg, true),
+            context_budget,
         )
         .await?
     };
@@ -217,6 +222,7 @@ pub(crate) async fn build_summarized_fork_history(
         source_envelope.as_ref(),
     )
     .await?;
+    compacted = vtcode_core::compaction::bound_compacted_history_to_context(compacted, provider, model, context_budget);
 
     Ok(compacted)
 }
@@ -331,12 +337,20 @@ async fn run_manual_compaction(
     let mut compaction_input = history.clone();
     strip_existing_memory_envelope(&mut compaction_input);
     let original_history = compaction_input.clone();
-    let (compacted, compaction_mode) = vtcode_core::compaction::compact_history_manual(
+    let context_budget = match vtcode_core::compaction::effective_context_budget(vt_cfg, provider, model) {
+        0 => None,
+        budget => Some(budget),
+    };
+    let mut compaction_options = options.clone();
+    compaction_options.allow_reasoning_effort_downgrade =
+        vt_cfg.is_some_and(|config| config.agent.allow_reasoning_effort_downgrade);
+    let (compacted, compaction_mode) = vtcode_core::compaction::compact_history_manual_with_budget(
         provider,
         model,
         &compaction_input,
         &local_compaction_config(vt_cfg, true),
-        options,
+        &compaction_options,
+        context_budget,
     )
     .await?;
     if compacted == compaction_input {
@@ -367,6 +381,7 @@ async fn run_manual_compaction(
         previous_response_chain_present,
         compacted,
         compaction_mode,
+        context_budget,
         true,
     )
     .await
@@ -441,6 +456,14 @@ async fn compact_history_segment_in_place_with_boundary(
     // hard `Err` (Anthropic does not override `compact_history`) with a graceful
     // Local fallback, so recovery never aborts.
     let config = local_compaction_config(vt_cfg, false);
+    let context_budget = match vtcode_core::compaction::effective_context_budget(vt_cfg, provider, model) {
+        0 => None,
+        budget => Some(budget),
+    };
+    let manual_options = vtcode_core::compaction::ManualCompactionOptions {
+        allow_reasoning_effort_downgrade: vt_cfg.is_some_and(|config| config.agent.allow_reasoning_effort_downgrade),
+        ..Default::default()
+    };
     let strategy = vtcode_core::compaction::manual_compaction_strategy(provider, model);
     let compaction_history = if matches!(strategy, vtcode_core::compaction::CompactionStrategy::Local) {
         dedup_repeated_file_reads_for_local_compaction(&compaction_input)
@@ -452,12 +475,13 @@ async fn compact_history_segment_in_place_with_boundary(
     if !config.always_summarize && compaction_history.len() <= config.keep_last_messages {
         return Ok(None);
     }
-    let (compacted, compaction_mode) = vtcode_core::compaction::compact_history_manual(
+    let (compacted, compaction_mode) = vtcode_core::compaction::compact_history_manual_with_budget(
         provider,
         model,
         &compaction_history,
         &config,
-        &vtcode_core::compaction::ManualCompactionOptions::default(),
+        &manual_options,
+        context_budget,
     )
     .await?;
 
@@ -482,6 +506,7 @@ async fn compact_history_segment_in_place_with_boundary(
         previous_response_chain_present,
         compacted,
         compaction_mode,
+        context_budget,
         begin_segment,
     )
     .await
@@ -496,6 +521,7 @@ async fn apply_compacted_history(
     previous_response_chain_present: bool,
     compacted: Vec<Message>,
     compaction_mode: vtcode_core::exec::events::CompactionMode,
+    context_budget: Option<usize>,
     begin_segment: bool,
 ) -> Result<CompactionOutcome> {
     let CompactionContext {
@@ -526,7 +552,6 @@ async fn apply_compacted_history(
     }
 
     let mut compacted = compacted;
-    let compacted_len = compacted.len();
     let touched_files = session_stats.recent_touched_files();
     let envelope = persist_memory_envelope_async_with_update(
         workspace_root,
@@ -541,7 +566,9 @@ async fn apply_compacted_history(
         steering_update.as_ref(),
     )
     .await?;
+    compacted = vtcode_core::compaction::bound_compacted_history_to_context(compacted, provider, model, context_budget);
     let history_artifact_path = envelope.as_ref().and_then(|item| item.history_artifact_path.clone());
+    let compacted_len = compacted.len();
     let segment_transition = begin_segment.then(|| session_stats.begin_request_segment(plan.boundary_reason));
     *history = compacted;
     session_stats.clear_previous_response_chain_for(provider.name(), model);
@@ -797,6 +824,10 @@ pub(crate) async fn maybe_auto_compact_history(
     // It enforces the `auto_compaction_enabled` gate, the token threshold, and
     // the engine + memory-envelope + artifact compression in one place.
     let mut compacted_history = history.clone();
+    let manual_options = vtcode_core::compaction::ManualCompactionOptions {
+        allow_reasoning_effort_downgrade: vt_cfg.is_some_and(|config| config.agent.allow_reasoning_effort_downgrade),
+        ..Default::default()
+    };
     let Some(outcome) = auto_compact_messages(
         AutoCompactionInput {
             provider,
@@ -813,7 +844,7 @@ pub(crate) async fn maybe_auto_compact_history(
                 }),
             touched_files: &session_stats.recent_touched_files(),
             engine_cfg: local_compaction_config(vt_cfg, false),
-            manual_options: vtcode_core::compaction::ManualCompactionOptions::default(),
+            manual_options,
             placement: MemoryEnvelopePlacement::BeforeLastUserOrSummary,
             prefire: Some(&session_stats.prefire),
             auto_compact_suppressed: &mut session_stats.auto_compact_suppressed,

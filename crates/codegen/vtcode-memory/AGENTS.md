@@ -13,8 +13,10 @@
 - Return persistence errors to callers; do not silently discard cap-enforcement failures.
 - Retention may remove only validated direct child session directories; preserve active manifests and reject manifest-controlled paths or symlink entries.
 - `event_log.rs`: turn-lifecycle state machine is `LogState::apply_lifecycle_event` (single impl shared by `append` and `scan` via `LifecycleKind`). Serialization+rollback is `LogState::serialize_event`. Cap eviction planning is `LogState::plan_cap_eviction` (I/O stays in `enforce_event_cap`). Do not duplicate these state transitions inline.
-- Session event bytes are synced before metadata; compaction and metadata use private atomic replacement, and reopening rescans when metadata is malformed or offsets exceed the canonical log.
+- Session event bytes are synced before derived metadata; publish the turn index before the manifest, leave the pending cap-rewrite marker until both are durable, and rescan when metadata is malformed, inconsistent, or offsets exceed the canonical log.
 - Session directories are `0700` and session files are `0600`; preserve the symlink-safe `vtcode-commons` filesystem primitives.
+- `query::search_memory` uses BM25 (`k1=1.2`, `b=0.75`) with deterministic chunk-id ties; invalidate the manifest LRU when atomic manifests change.
+- Cap eviction invokes its summary hook before replacing `events.jsonl`; a failed summary keeps the canonical events intact.
 
 ## Dependencies
 

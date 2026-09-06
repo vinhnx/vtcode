@@ -9,7 +9,6 @@ use vtcode_core::utils::ansi::{AnsiRenderer, MessageStyle};
 
 use super::super::selection::{
     SelectionDetail, reasoning_level_description, reasoning_level_label, service_tier_label,
-    supports_gpt5_none_reasoning, supports_max_reasoning, supports_xhigh_reasoning,
 };
 use super::{CURRENT_BADGE, KEEP_CURRENT_DESCRIPTION, REASONING_OFF_BADGE, STEP_THREE_TITLE, STEP_TWO_TITLE};
 
@@ -28,9 +27,8 @@ pub(crate) fn render_reasoning_inline(
         search_value: None,
     });
 
-    // For GPT-5.2 and GPT-5.3 Codex models, show "None" first as the default option (fastest)
-    let is_gpt5_responses = supports_gpt5_none_reasoning(&selection.model_id);
-    if is_gpt5_responses {
+    let levels = selection.reasoning_effort_levels();
+    if levels.contains(&ReasoningEffortLevel::None) {
         items.push(InlineListItem {
             title: reasoning_level_label(ReasoningEffortLevel::None).to_string(),
             subtitle: Some(reasoning_level_description(ReasoningEffortLevel::None).to_string()),
@@ -41,21 +39,7 @@ pub(crate) fn render_reasoning_inline(
         });
     }
 
-    let mut levels = vec![
-        ReasoningEffortLevel::Minimal,
-        ReasoningEffortLevel::Low,
-        ReasoningEffortLevel::Medium,
-        ReasoningEffortLevel::High,
-    ];
-
-    if supports_xhigh_reasoning(&selection.model_id) {
-        levels.push(ReasoningEffortLevel::XHigh);
-    }
-    if supports_max_reasoning(&selection.model_id) {
-        levels.push(ReasoningEffortLevel::Max);
-    }
-
-    for level in levels {
+    for level in levels.into_iter().filter(|level| *level != ReasoningEffortLevel::None) {
         items.push(InlineListItem {
             title: reasoning_level_label(level).to_string(),
             subtitle: Some(reasoning_level_description(level).to_string()),
@@ -106,33 +90,27 @@ pub(crate) fn prompt_reasoning_plain(
     selection: &SelectionDetail,
     current: ReasoningEffortLevel,
 ) -> Result<()> {
-    let is_responses_flagship = supports_gpt5_none_reasoning(&selection.model_id);
-    let reasoning_suffix =
-        match (supports_xhigh_reasoning(&selection.model_id), supports_max_reasoning(&selection.model_id)) {
-            (true, true) => "/xhigh/max",
-            (true, false) => "/xhigh",
-            (false, true) => "/max",
-            (false, false) => "",
-        };
+    let is_responses_flagship = selection.reasoning_effort_levels().contains(&ReasoningEffortLevel::None);
+    let effort_choices = selection
+        .reasoning_effort_levels()
+        .into_iter()
+        .map(reasoning_level_input)
+        .collect::<Vec<_>>()
+        .join("/");
+    let effort_choices = if effort_choices.is_empty() {
+        "skip".to_string()
+    } else {
+        effort_choices
+    };
 
     if selection.reasoning_optional {
-        let prefix = if is_responses_flagship {
-            "none/low/medium/high"
-        } else {
-            "low/medium/high"
-        };
         renderer.line(
             MessageStyle::Info,
             &format!(
-                "Step 2 – reasoning effort (current: {current}). Choose {prefix}{reasoning_suffix} or type 'skip' if the model does not expose configurable reasoning."
+                "Step 2 – reasoning effort (current: {current}). Choose {effort_choices} or type 'skip' if the model does not expose configurable reasoning."
             ),
         )?;
     } else if let Some(alternative) = selection.reasoning_off_model.as_ref() {
-        let prefix = if is_responses_flagship {
-            "none/low/medium/high"
-        } else {
-            "low/medium/high"
-        };
         let gpt5_hint = if is_responses_flagship {
             " For GPT-5.x, 'none' provides lowest latency."
         } else {
@@ -143,8 +121,8 @@ pub(crate) fn prompt_reasoning_plain(
             &format!(
                 "Step 2 – select reasoning effort for {} ({}{}). Type 'skip' to keep {} or 'off' to use {} ({}).{}",
                 selection.model_display,
-                prefix,
-                reasoning_suffix,
+                effort_choices,
+                "",
                 alternative.display_name(),
                 alternative.as_str(),
                 alternative.display_name(),
@@ -152,11 +130,6 @@ pub(crate) fn prompt_reasoning_plain(
             ),
         )?;
     } else {
-        let prefix = if is_responses_flagship {
-            "none/low/medium/high"
-        } else {
-            "low/medium/high"
-        };
         let gpt5_hint = if is_responses_flagship {
             " For GPT-5.x, 'none' provides lowest latency."
         } else {
@@ -166,11 +139,24 @@ pub(crate) fn prompt_reasoning_plain(
             MessageStyle::Info,
             &format!(
                 "Step 2 – select reasoning effort for {} ({}{}). Type 'skip' to keep {}. Current: {}.{}",
-                selection.model_display, prefix, reasoning_suffix, current, current, gpt5_hint
+                selection.model_display, effort_choices, "", current, current, gpt5_hint
             ),
         )?;
     }
     Ok(())
+}
+
+fn reasoning_level_input(level: ReasoningEffortLevel) -> &'static str {
+    match level {
+        ReasoningEffortLevel::None => "none",
+        ReasoningEffortLevel::Minimal => "minimal",
+        ReasoningEffortLevel::Low => "low",
+        ReasoningEffortLevel::Medium => "medium",
+        ReasoningEffortLevel::High => "high",
+        ReasoningEffortLevel::XHigh => "xhigh",
+        ReasoningEffortLevel::Max => "max",
+        ReasoningEffortLevel::Unknown => "unknown",
+    }
 }
 
 pub(crate) fn prompt_api_key_plain(

@@ -188,7 +188,7 @@ pub(crate) fn convert_to_anthropic_format(
     let messages_breakpoints_used = messages_breakpoints_before.saturating_sub(breakpoints_remaining);
     let explicit_breakpoints_used = max_breakpoints.saturating_sub(breakpoints_remaining);
 
-    let (thinking_val, reasoning_val) = build_thinking_config(request, ctx.anthropic_config, ctx.model);
+    let (thinking_val, reasoning_val) = build_thinking_config(request, ctx.anthropic_config, ctx.model)?;
 
     let final_tool_choice = build_tool_choice(request, &thinking_val);
     let anthropic_overrides = request.anthropic_request_overrides.as_ref();
@@ -463,7 +463,8 @@ mod tests {
     #[test]
     fn resolve_advisor_tool_supports_dated_executor_suffix() {
         let cfg = advisor_config(true, "", None);
-        // `-20251001` version pin must not break the supported-model check.
-        assert!(resolve_advisor_tool("claude-sonnet-4-6-20251001", &cfg).is_some());
+        // A dated pin for a currently supported model must not break the
+        // supported-model check.
+        assert!(resolve_advisor_tool("claude-sonnet-5-20251001", &cfg).is_some());
     }
 }

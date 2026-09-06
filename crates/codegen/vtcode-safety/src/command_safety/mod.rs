@@ -98,6 +98,7 @@ pub fn validate_command_safety(command: &str) -> anyhow::Result<()> {
         bail!("dynamic shell expansion in find commands is not allowed");
     }
 
+    shell_parser::validate_redirection_paths(command)?;
     let segments = shell_parser::split_shell_segments(command)?;
 
     if shell_string_might_be_dangerous(command) {
@@ -146,6 +147,27 @@ mod tests {
                 validate_command_safety(payload).is_err(),
                 "prompt-injection-shaped payload was accepted: {payload}"
             );
+        }
+    }
+    #[test]
+    fn preflight_checks_redirection_destinations_in_nested_shell_commands() {
+        for command in [
+            "echo harmless > /etc/passwd",
+            "echo harmless >> ../outside",
+            "cat < /etc/shadow",
+            "if true; then echo harmless > /root/config; fi",
+            "echo harmless > $OUTPUT",
+            "echo harmless > $(printf target)",
+        ] {
+            assert!(validate_command_safety(command).is_err(), "must reject {command}");
+        }
+        for command in [
+            "echo harmless > build.log 2>&1",
+            "echo harmless > 'build log.txt'",
+            "cat < input.txt > output.txt",
+            "echo harmless > /dev/null 2>&1",
+        ] {
+            assert!(validate_command_safety(command).is_ok(), "must allow {command}");
         }
     }
 }

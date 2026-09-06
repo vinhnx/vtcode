@@ -305,7 +305,15 @@ impl ModelPickerState {
 
     pub(super) fn build_result(&self) -> Result<ModelSelectionResult> {
         let selection = self.selection.as_ref().ok_or_else(|| anyhow!("Model selection missing"))?;
-        let chosen_reasoning = self.selected_reasoning.unwrap_or(self.settings.current_reasoning);
+        // A model switch can land on a route that exposes structured reasoning
+        // but no configurable effort. Never carry the previous route's effort
+        // into that result; `None` is the explicit disable value for the new
+        // route and keeps finalization from issuing an invalid request.
+        let chosen_reasoning = if selection.reasoning_effort_supported {
+            self.selected_reasoning.unwrap_or(self.settings.current_reasoning)
+        } else {
+            ReasoningEffortLevel::None
+        };
         let reasoning_changed = chosen_reasoning != self.settings.current_reasoning;
         let chosen_service_tier = self.selected_service_tier.unwrap_or(self.settings.current_service_tier);
         let service_tier_changed = chosen_service_tier != self.settings.current_service_tier;
@@ -317,6 +325,7 @@ impl ModelPickerState {
             model: selection.model_id.clone(),
             model_display: selection.model_display.clone(),
             known_model: selection.known_model,
+            context_window: selection.context_window,
             reasoning_supported: selection.reasoning_supported,
             reasoning: chosen_reasoning,
             reasoning_changed,
@@ -391,11 +400,22 @@ impl ModelPickerState {
             self.pending_credential_source = None;
         }
 
+        let reasoning_effort_supported = selection.reasoning_effort_supported;
         self.selection = Some(selection);
+        if !reasoning_effort_supported {
+            let inherited = self.selected_reasoning.unwrap_or(self.settings.current_reasoning);
+            self.selected_reasoning = Some(ReasoningEffortLevel::None);
+            if inherited != ReasoningEffortLevel::None {
+                renderer.line(
+                    MessageStyle::Info,
+                    "The selected route does not expose configurable reasoning effort; reasoning was disabled.",
+                )?;
+            }
+        }
         if self
             .selection
             .as_ref()
-            .map(|detail| detail.reasoning_supported)
+            .map(|detail| detail.reasoning_effort_supported)
             .unwrap_or(false)
         {
             self.step = PickerStep::AwaitReasoning;

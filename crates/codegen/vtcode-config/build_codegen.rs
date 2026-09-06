@@ -410,6 +410,10 @@ pub fn generate_model_capabilities(entries: &[CapabilityEntry]) -> String {
             pub input_modalities: &'static [&'static str],
             pub caching: bool,
             pub structured_output: bool,
+            pub supports_sampling: bool,
+            pub supports_logprobs: bool,
+            pub prompt_cache_ttl: Option<&'static str>,
+            pub prompt_contract: Option<&'static str>,
             pub pricing: Pricing,
         }
 
@@ -458,6 +462,16 @@ fn capability_entry_expr(entry: &CapabilityEntry) -> TokenStream {
     let modalities: TokenStream = entry.input_modalities.iter().map(|m| quote! { #m, }).collect();
     let caching = entry.caching;
     let structured_output = entry.structured_output;
+    let supports_sampling = entry.supports_sampling;
+    let supports_logprobs = entry.supports_logprobs;
+    let prompt_cache_ttl = match &entry.prompt_cache_ttl {
+        Some(value) => quote! { Some(#value) },
+        None => quote! { None },
+    };
+    let prompt_contract = match &entry.prompt_contract {
+        Some(value) => quote! { Some(#value) },
+        None => quote! { None },
+    };
     let pricing = pricing_literal(&entry.pricing);
 
     quote! {
@@ -479,6 +493,10 @@ fn capability_entry_expr(entry: &CapabilityEntry) -> TokenStream {
             ],
             caching: #caching,
             structured_output: #structured_output,
+            supports_sampling: #supports_sampling,
+            supports_logprobs: #supports_logprobs,
+            prompt_cache_ttl: #prompt_cache_ttl,
+            prompt_contract: #prompt_contract,
             pricing: #pricing,
         }
     }

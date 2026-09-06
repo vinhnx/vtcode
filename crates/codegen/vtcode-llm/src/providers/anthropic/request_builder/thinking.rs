@@ -54,7 +54,7 @@ pub(crate) fn build_thinking_config(
     request: &LLMRequest,
     anthropic_config: &AnthropicConfig,
     default_model: &str,
-) -> (Option<ThinkingConfig>, Option<Value>) {
+) -> Result<(Option<ThinkingConfig>, Option<Value>), crate::provider::LLMError> {
     let resolved_model = resolve_model_name(&request.model, default_model);
     let profile = claude_thinking_profile(resolved_model, default_model);
     let display = resolve_thinking_display(request, anthropic_config);
@@ -66,21 +66,21 @@ pub(crate) fn build_thinking_config(
                 if default_thinking {
                     if matches_model(resolved_model, anthropic::CLAUDE_OPUS_5) {
                         if effort_is_at_most_high(request, anthropic_config) {
-                            return (Some(ThinkingConfig::Disabled), None);
+                            return Ok((Some(ThinkingConfig::Disabled), None));
                         }
-                        return (None, None);
+                        return Ok((None, None));
                     }
                     if matches_model(resolved_model, anthropic::CLAUDE_SONNET_5) {
-                        return (Some(ThinkingConfig::Disabled), None);
+                        return Ok((Some(ThinkingConfig::Disabled), None));
                     }
                 }
-                return (None, None);
+                return Ok((None, None));
             }
             AnthropicThinkingModeOverride::Adaptive => {
-                return (Some(ThinkingConfig::Adaptive { display }), None);
+                return Ok((Some(ThinkingConfig::Adaptive { display }), None));
             }
             AnthropicThinkingModeOverride::ManualBudget(budget) => {
-                return (manual_thinking_config(budget, request.max_tokens, display), None);
+                return Ok((manual_thinking_config(budget, request.max_tokens, display), None));
             }
             AnthropicThinkingModeOverride::Inherit => {}
         }
@@ -103,9 +103,9 @@ pub(crate) fn build_thinking_config(
             if profile.is_some_and(|p| p.supports_manual_budget)
                 && let Some(explicit_budget) = request.thinking_budget
             {
-                return (manual_thinking_config(explicit_budget, request.max_tokens, display), None);
+                return Ok((manual_thinking_config(explicit_budget, request.max_tokens, display), None));
             }
-            return (Some(ThinkingConfig::Adaptive { display }), None);
+            return Ok((Some(ThinkingConfig::Adaptive { display }), None));
         }
 
         let max_thinking_tokens: Option<u32> =
@@ -130,23 +130,23 @@ pub(crate) fn build_thinking_config(
         };
 
         if let Some(thinking) = manual_thinking_config(budget, request.max_tokens, display) {
-            return (Some(thinking), None);
+            return Ok((Some(thinking), None));
         }
     } else if let Some(effort) = request.reasoning_effort {
         if profile.is_some_and(|p| matches!(p.mode, super::super::capabilities::ClaudeThinkingMode::Adaptive)) {
-            return (None, None);
+            return Ok((None, None));
         }
 
         if let Some(payload) =
-            RigProviderCapabilities::new(Provider::Anthropic, &request.model).reasoning_parameters(effort)
+            RigProviderCapabilities::new(Provider::Anthropic, &request.model).reasoning_parameters(effort)?
         {
-            return (None, Some(payload));
+            return Ok((None, Some(payload)));
         } else {
-            return (None, Some(json!({ "effort": effort.as_str() })));
+            return Ok((None, Some(json!({ "effort": effort.as_str() }))));
         }
     }
 
-    (None, None)
+    Ok((None, None))
 }
 
 #[cfg(test)]
@@ -162,7 +162,8 @@ mod tests {
             ..Default::default()
         };
         let config = AnthropicConfig::default();
-        let (thinking, _) = build_thinking_config(&request, &config, anthropic::DEFAULT_MODEL);
+        let (thinking, _) =
+            build_thinking_config(&request, &config, anthropic::DEFAULT_MODEL).expect("thinking config");
 
         assert!(matches!(thinking, Some(ThinkingConfig::Adaptive { .. })));
     }
@@ -177,7 +178,8 @@ mod tests {
             thinking_display: Some(vtcode_config::ThinkingDisplayMode::Summarized),
             ..AnthropicConfig::default()
         };
-        let (thinking, _) = build_thinking_config(&request, &config, anthropic::DEFAULT_MODEL);
+        let (thinking, _) =
+            build_thinking_config(&request, &config, anthropic::DEFAULT_MODEL).expect("thinking config");
 
         match thinking {
             Some(ThinkingConfig::Adaptive { display: Some(ThinkingDisplay::Summarized) }) => {}
@@ -195,7 +197,8 @@ mod tests {
             thinking_display: Some(vtcode_config::ThinkingDisplayMode::Omitted),
             ..AnthropicConfig::default()
         };
-        let (thinking, _) = build_thinking_config(&request, &config, anthropic::DEFAULT_MODEL);
+        let (thinking, _) =
+            build_thinking_config(&request, &config, anthropic::DEFAULT_MODEL).expect("thinking config");
 
         match thinking {
             Some(ThinkingConfig::Adaptive { display: Some(ThinkingDisplay::Omitted) }) => {}
@@ -213,7 +216,8 @@ mod tests {
             thinking_display: Some(vtcode_config::ThinkingDisplayMode::Summarized),
             ..AnthropicConfig::default()
         };
-        let (thinking, _) = build_thinking_config(&request, &config, anthropic::DEFAULT_MODEL);
+        let (thinking, _) =
+            build_thinking_config(&request, &config, anthropic::DEFAULT_MODEL).expect("thinking config");
 
         match thinking {
             Some(ThinkingConfig::Adaptive { display: Some(ThinkingDisplay::Summarized) }) => {}
@@ -228,7 +232,8 @@ mod tests {
             ..Default::default()
         };
         let config = AnthropicConfig::default();
-        let (thinking, _) = build_thinking_config(&request, &config, anthropic::DEFAULT_MODEL);
+        let (thinking, _) =
+            build_thinking_config(&request, &config, anthropic::DEFAULT_MODEL).expect("thinking config");
 
         match thinking {
             Some(ThinkingConfig::Adaptive { display: None }) => {}

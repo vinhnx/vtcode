@@ -531,7 +531,7 @@ pub async fn generate_system_instruction_with_config_and_report(
     project_root: &Path,
     vtcode_config: Option<&crate::config::VTCodeConfig>,
 ) -> (Content, SystemPromptReport) {
-    let cache_key = cache_key(project_root, vtcode_config, None);
+    let cache_key = cache_key(project_root, vtcode_config, 0);
     let (instruction, report) = match PROMPT_CACHE.get(&cache_key) {
         Some(cached) => cached,
         None => {
@@ -572,25 +572,28 @@ pub async fn apply_output_style(
 /// `catalog_epoch` is the tool-catalog version at the time of the request. When
 /// the tool set changes (e.g. planning workflow is toggled, MCP tools are refreshed), the
 /// epoch advances and the old cached prompt is superseded rather than served stale.
-/// Pass `None` to get the same behaviour as before epoch tracking was introduced.
-fn cache_key(
-    project_root: &Path,
-    vtcode_config: Option<&crate::config::VTCodeConfig>,
-    catalog_epoch: Option<u64>,
-) -> String {
-    use std::collections::hash_map::DefaultHasher;
+fn cache_key(project_root: &Path, vtcode_config: Option<&crate::config::VTCodeConfig>, catalog_epoch: u64) -> String {
     use std::hash::{Hash, Hasher};
 
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = crate::core::agent::hash_utils::StableHasher::new();
 
     project_root.hash(&mut hasher);
 
     if let Some(cfg) = vtcode_config {
-        cfg.agent.provider.hash(&mut hasher);
-        cfg.agent.default_model.hash(&mut hasher);
-        cfg.agent.reasoning_effort.to_string().hash(&mut hasher);
+        let catalog = crate::config::models::model_catalog_entry(&cfg.agent.provider, &cfg.agent.default_model);
+        let capability_identity = crate::core::agent::hash_utils::PromptCapabilityIdentity::from_catalog(
+            &cfg.agent.provider,
+            &cfg.agent.default_model,
+            Some(cfg.agent.reasoning_effort),
+            catalog_epoch,
+            catalog,
+        );
+        capability_identity.hash(&mut hasher);
         cfg.agent.include_working_directory.hash(&mut hasher);
         cfg.agent.include_temporal_context.hash(&mut hasher);
+        cfg.agent.temporal_context_use_utc.hash(&mut hasher);
+        cfg.chat.ask_questions.enabled.hash(&mut hasher);
+        cfg.mcp.enabled.hash(&mut hasher);
         cfg.prompt_cache.cache_friendly_prompt_shaping.hash(&mut hasher);
         cfg.agent.include_structured_reasoning_tags.hash(&mut hasher);
         std::mem::discriminant(&cfg.agent.system_prompt_mode).hash(&mut hasher);
@@ -599,11 +602,20 @@ fn cache_key(
         cfg.agent.system_prompt_budget_warning.hash(&mut hasher);
         cfg.agent.trim_system_prompt.hash(&mut hasher);
         cfg.default_primary_agent.hash(&mut hasher);
+        format!("{:?}", cfg.agent.shell_prompt_profile).hash(&mut hasher);
     } else {
         "default".hash(&mut hasher);
+        crate::core::agent::hash_utils::PromptCapabilityIdentity::from_catalog(
+            "default",
+            "default",
+            None,
+            catalog_epoch,
+            None,
+        )
+        .hash(&mut hasher);
     }
 
-    catalog_epoch.unwrap_or(0).hash(&mut hasher);
+    catalog_epoch.hash(&mut hasher);
 
     format!("sys_prompt:{:016x}", hasher.finish())
 }
@@ -1995,27 +2007,27 @@ Use a skill only when the user names it or the task clearly matches. Load detail
     fn test_cache_key_changes_with_model_capability_configuration() {
         let root = PathBuf::from("/workspace");
         let mut config = VTCodeConfig::default();
-        let initial = cache_key(&root, Some(&config), Some(1));
+        let initial = cache_key(&root, Some(&config), 1);
         config.agent.default_model = "different-model".into();
-        let model_changed = cache_key(&root, Some(&config), Some(1));
+        let model_changed = cache_key(&root, Some(&config), 1);
         assert_ne!(initial, model_changed);
         config.agent.reasoning_effort = crate::config::types::ReasoningEffortLevel::Max;
-        let reasoning_changed = cache_key(&root, Some(&config), Some(1));
+        let reasoning_changed = cache_key(&root, Some(&config), 1);
         assert_ne!(model_changed, reasoning_changed);
-        assert_ne!(reasoning_changed, cache_key(&root, Some(&config), Some(2)));
+        assert_ne!(reasoning_changed, cache_key(&root, Some(&config), 2));
     }
 
     #[test]
     fn test_cache_key_changes_with_budget_settings() {
         let project_root = PathBuf::from("/workspace");
         let base_config = VTCodeConfig::default();
-        let base_key = cache_key(&project_root, Some(&base_config), None);
+        let base_key = cache_key(&project_root, Some(&base_config), 0);
 
         let mut max_tokens_changed = VTCodeConfig::default();
         max_tokens_changed.agent.max_system_prompt_tokens += 1;
         assert_ne!(
             base_key,
-            cache_key(&project_root, Some(&max_tokens_changed), None),
+            cache_key(&project_root, Some(&max_tokens_changed), 0),
             "cache key must change when max_system_prompt_tokens changes"
         );
 
@@ -2023,7 +2035,7 @@ Use a skill only when the user names it or the task clearly matches. Load detail
         warning_changed.agent.system_prompt_budget_warning = !warning_changed.agent.system_prompt_budget_warning;
         assert_ne!(
             base_key,
-            cache_key(&project_root, Some(&warning_changed), None),
+            cache_key(&project_root, Some(&warning_changed), 0),
             "cache key must change when system_prompt_budget_warning changes"
         );
 
@@ -2031,7 +2043,7 @@ Use a skill only when the user names it or the task clearly matches. Load detail
         trim_changed.agent.trim_system_prompt = !trim_changed.agent.trim_system_prompt;
         assert_ne!(
             base_key,
-            cache_key(&project_root, Some(&trim_changed), None),
+            cache_key(&project_root, Some(&trim_changed), 0),
             "cache key must change when trim_system_prompt changes"
         );
     }
@@ -2043,7 +2055,7 @@ Use a skill only when the user names it or the task clearly matches. Load detail
             default_primary_agent: "build".to_string(),
             ..Default::default()
         };
-        let base_key = cache_key(&project_root, Some(&base_config), None);
+        let base_key = cache_key(&project_root, Some(&base_config), 0);
 
         let auto_config = VTCodeConfig {
             default_primary_agent: "auto".to_string(),
@@ -2051,7 +2063,7 @@ Use a skill only when the user names it or the task clearly matches. Load detail
         };
         assert_ne!(
             base_key,
-            cache_key(&project_root, Some(&auto_config), None),
+            cache_key(&project_root, Some(&auto_config), 0),
             "cache key must change when default_primary_agent changes, since \
              agent_identity_label rewrites the composed prompt"
         );

@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn normalizes_namespaced_model_for_wire() {
-        let provider = EvolinkProvider::with_model("test-key".to_string(), "evolink/gpt-5.2".to_string());
+        let provider = EvolinkProvider::with_model("test-key".to_string(), "evolink/gpt-5.6".to_string());
         assert_eq!(provider.model_id_for_test(), models::evolink::GPT_5_6);
     }
 
@@ -417,7 +417,7 @@ mod tests {
     fn golden_payload_basic_shape() {
         let provider = EvolinkProvider::new("test-key".to_string());
         let mut request = LLMRequest {
-            model: "evolink/gpt-5.2".to_string(),
+            model: "evolink/gpt-5.6".to_string(),
             messages: vec![Message::user("hello".to_string())].into(),
             system_prompt: Some(Arc::from("system guidance")),
             max_tokens: Some(512),

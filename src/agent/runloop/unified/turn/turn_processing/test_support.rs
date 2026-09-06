@@ -73,6 +73,10 @@ impl uni::LLMProvider for NoopProvider {
         true
     }
 
+    fn supported_reasoning_efforts(&self, _model: &str) -> &'static [&'static str] {
+        &["low", "medium", "high", "xhigh", "max"]
+    }
+
     fn validate_request(&self, _request: &uni::LLMRequest) -> Result<(), uni::LLMError> {
         Ok(())
     }

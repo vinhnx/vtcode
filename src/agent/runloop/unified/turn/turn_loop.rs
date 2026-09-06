@@ -843,6 +843,19 @@ pub(crate) async fn run_turn_loop(
         }
 
         let active_model = resolve_effective_request_model(&ctx.config.model, ctx.active_primary_agent.active());
+        // A configured monetary budget is an enforcement contract. Validate
+        // pricing before any compaction path because native compaction can
+        // itself dispatch a provider request.
+        if let Some(max_budget_usd) = ctx.vt_cfg.and_then(|cfg| cfg.agent.harness.max_budget_usd)
+            && let Err(error) = vtcode_core::llm::usage_cost::require_budget_pricing(
+                ctx.provider_client.name(),
+                &active_model,
+                Some(max_budget_usd),
+            )
+        {
+            result = TurnLoopResult::Blocked { reason: Some(error.to_string()) };
+            break;
+        }
         let harness_snapshot = ctx.tool_registry.harness_context_snapshot();
         let steering_update = vtcode_core::compaction::memory_envelope::SessionMemoryEnvelopeUpdate {
             pending_intents: Some(ctx.runtime_steering.pending_follow_up_intents_snapshot()),
@@ -897,6 +910,14 @@ pub(crate) async fn run_turn_loop(
                 }
             }
         } else {
+            tracing::info!(
+                model = %active_model,
+                context_budget = vtcode_core::compaction::effective_context_budget(
+                    ctx.vt_cfg, ctx.provider_client.as_ref(), &active_model,
+                ),
+                prompt_tokens = ctx.context_manager.current_token_usage(),
+                "Resolved per-turn context budget denominator"
+            );
             match crate::agent::runloop::unified::turn::compaction::maybe_auto_compact_history(
                 crate::agent::runloop::unified::turn::compaction::CompactionContext::new(
                     ctx.provider_client.as_ref(),
@@ -935,11 +956,6 @@ pub(crate) async fn run_turn_loop(
 
         // Clone validation cache arc to avoid borrow conflict
         let validation_cache = ctx.session_stats.validation_cache.clone();
-
-        // Capture input status state for potential restoration after LLM response
-        // (needed because turn_processing_ctx will mutably borrow input_status_state)
-        let restore_status_left = ctx.input_status_state.left.clone();
-        let restore_status_right = ctx.input_status_state.right.clone();
 
         // Anti-runaway guard: if the model has already emitted
         // MAX_ASSISTANT_TEXT_RESPONSES_PER_TURN consecutive text-only
@@ -990,6 +1006,10 @@ pub(crate) async fn run_turn_loop(
         }
 
         // Prepare turn processing context
+        // Capture input status state before constructing the context, which
+        // mutably borrows the turn loop context for the request lifetime.
+        let restore_status_left = ctx.input_status_state.left.clone();
+        let restore_status_right = ctx.input_status_state.right.clone();
         let mut turn_processing_ctx = ctx.as_turn_processing_context(working_history);
 
         // === PROACTIVE GUARDS (HP-2: Pre-request checks) ===
@@ -1004,11 +1024,12 @@ pub(crate) async fn run_turn_loop(
         let recovery_pass = turn_processing_ctx.consume_recovery_pass();
 
         let tool_free_recovery = recovery_pass && turn_processing_ctx.recovery_is_tool_free();
-
+        // Capture input status state for potential restoration after a
+        // pre-request block or provider failure.
         // Cache-gap advisory (Phase E1): warn once per gap when the user
         // paused long enough for the provider prompt cache to have expired,
         // so this request may unexpectedly re-pay full input cost.
-        let cache_gap_provider_name = turn_processing_ctx.config.provider.clone();
+        let cache_gap_provider_name = turn_processing_ctx.provider_client.name().to_string();
         if let Some(threshold) = turn_processing_ctx
             .vt_cfg
             .and_then(|cfg| cfg.prompt_cache.gap_threshold_secs(&cache_gap_provider_name))
@@ -1060,6 +1081,14 @@ pub(crate) async fn run_turn_loop(
         let (response, response_streamed) = match request_result {
             Ok(val) => val,
             Err(err) => {
+                if err
+                    .downcast_ref::<vtcode_core::llm::reasoning_effort::ReasoningEffortUnsupported>()
+                    .is_some()
+                {
+                    turn_processing_ctx.restore_input_status(restore_status_left.clone(), restore_status_right.clone());
+                    result = TurnLoopResult::Blocked { reason: Some(err.to_string()) };
+                    break;
+                }
                 // Record the error in the recovery state for diagnostics
                 turn_processing_ctx
                     .record_recovery_error("llm_request", &err, ErrorType::Other)
@@ -1156,17 +1185,24 @@ pub(crate) async fn run_turn_loop(
 
         // Track turn usage and context pressure before later processing borrows `response`.
         let response_usage = response.usage.clone();
-        let provider_name = turn_processing_ctx.config.provider.clone();
+        // Usage normalization and pricing must follow the provider instance
+        // that will serve the request. Configuration may contain an alias or
+        // an inferred route, while the provider trait is authoritative.
+        let provider_name = turn_processing_ctx.provider_client.name().to_string();
         accumulate_turn_usage(&provider_name, &mut turn_usage, &response_usage);
         turn_processing_ctx.session_stats.record_usage(&provider_name, &response_usage);
         turn_processing_ctx
             .session_stats
             .set_stop_reason(Some(stop_reason_from_finish_reason(&response.finish_reason)));
         let max_budget_usd = turn_processing_ctx.vt_cfg.and_then(|cfg| cfg.agent.harness.max_budget_usd);
-        let total_usage = turn_processing_ctx.session_stats.total_usage();
-        match estimate_session_costs(&provider_name, &active_model, &total_usage) {
+        let turn_cost = response_usage.as_ref().and_then(|usage| {
+            let normalized = vtcode_core::llm::usage_cost::normalized_turn_usage(&provider_name, usage);
+            estimate_session_costs(&provider_name, &active_model, &normalized)
+        });
+        match turn_processing_ctx.session_stats.record_cost(turn_cost) {
             Some(estimate) => {
-                turn_processing_ctx.session_stats.set_total_cost_usd(Some(estimate.raw_usd));
+                // Keep the conservative raw figure for enforcement while the
+                // cache-aware effective figure is shown to users.
                 let threshold = turn_processing_ctx
                     .vt_cfg
                     .map(|cfg| cfg.agent.harness.budget_warning_threshold)
@@ -1228,7 +1264,7 @@ pub(crate) async fn run_turn_loop(
                                 "Session cost ${:.4} has reached {:.0}% of the ${max:.2} budget. {}",
                                 estimate.raw_usd,
                                 threshold * 100.0,
-                                total_usage.cache_summary(),
+                                turn_processing_ctx.session_stats.total_usage().cache_summary(),
                             ),
                         );
                     }
@@ -1236,18 +1272,12 @@ pub(crate) async fn run_turn_loop(
                 }
             }
             None => {
-                turn_processing_ctx.session_stats.set_total_cost_usd(None);
-                if max_budget_usd.is_some() && !turn_processing_ctx.session_stats.cost_warning_emitted() {
-                    turn_processing_ctx.session_stats.mark_cost_warning_emitted();
-                    tracing::warn!(
-                        provider = %provider_name,
-                        model = %active_model,
-                        "Budget enforcement disabled because pricing metadata is unavailable"
+                if max_budget_usd.is_some() {
+                    let reason = format!(
+                        "Cannot enforce session USD budget for `{provider_name}/{active_model}`: complete valid pricing metadata is unavailable"
                     );
-                    let _ = turn_processing_ctx.renderer.line(
-                        MessageStyle::Info,
-                        "Budget limit is not enforced for this model because pricing metadata is unavailable.",
-                    );
+                    result = TurnLoopResult::Blocked { reason: Some(reason) };
+                    break;
                 }
             }
         }

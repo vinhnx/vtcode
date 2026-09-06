@@ -12,7 +12,16 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 /// Network-capable tool names that should be filtered based on skill network policy.
-const NETWORK_TOOLS: &[&str] = &["http", "fetch", "browser", "web_search", "read_web_page", "curl"];
+const NETWORK_TOOLS: &[&str] = &[
+    "http",
+    "fetch",
+    "browser",
+    "web_search",
+    "web_fetch",
+    "defuddle_fetch",
+    "read_web_page",
+    "curl",
+];
 
 /// Execution-time allowlist derived from the definitions presented to a skill sub-call.
 ///
@@ -46,7 +55,7 @@ impl SkillToolScope {
 fn is_function_network_tool(tool: &ToolDefinition) -> bool {
     tool.function.as_ref().is_some_and(|function| {
         let name = function.name.to_ascii_lowercase();
-        NETWORK_TOOLS.iter().any(|candidate| name.contains(candidate))
+        NETWORK_TOOLS.contains(&name.as_str())
     })
 }
 
@@ -244,6 +253,23 @@ pub fn filter_tools_for_skill(skill: &Skill, tools: Vec<ToolDefinition>) -> Vec<
             })
             .collect(),
     }
+}
+
+/// Apply trusted registry metadata before exposing function tools to a skill.
+/// Domain restrictions cannot currently be enforced on arbitrary function tools.
+pub(super) fn filter_registered_tools_for_skill(
+    skill: &Skill,
+    tools: Vec<ToolDefinition>,
+    registry: &crate::tools::registry::ToolRegistry,
+) -> Vec<ToolDefinition> {
+    filter_tools_for_skill(skill, tools)
+        .into_iter()
+        .filter(|tool| tool.function.is_none() || skill_function_tool_permitted(registry, tool.function_name()))
+        .collect()
+}
+
+pub(super) fn skill_function_tool_permitted(registry: &crate::tools::registry::ToolRegistry, name: &str) -> bool {
+    registry.tool_network_access(name) == crate::tools::registry::ToolNetworkAccess::Local
 }
 
 fn skill_additional_permissions(skill: &Skill) -> Option<AdditionalPermissions> {

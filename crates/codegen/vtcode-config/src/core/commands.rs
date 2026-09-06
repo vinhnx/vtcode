@@ -70,7 +70,9 @@ const DEFAULT_ALLOW_LIST: &[&str] = &[
     "which",
     "echo",
     "printf",
+    "read",
     "date",
+    "sleep",
     // Version control
     "git status",
     "git diff",
@@ -283,7 +285,7 @@ impl Default for CommandsConfig {
             ],
             allow_regex: vec![
                 // File and text utilities
-                r"^(ls|pwd|cat|grep|find|head|tail|wc|echo|printf|date|tree|stat|file|sort|uniq|cut|awk|sed|tar|zip|unzip|gzip|gunzip)\b".into(),
+                r"^(ls|pwd|cat|grep|find|head|tail|wc|echo|printf|read|date|sleep|tree|stat|file|sort|uniq|cut|awk|sed|tar|zip|unzip|gzip|gunzip)\b".into(),
                 // Version control
                 r"^git (status|diff|log|show|branch|remote)\b".into(),
                 // Rust

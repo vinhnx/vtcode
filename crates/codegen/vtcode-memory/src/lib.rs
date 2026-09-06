@@ -38,7 +38,9 @@ pub mod query;
 pub mod retention;
 
 pub use error::SessionStoreError;
-pub use event_log::{DEFAULT_MAX_EVENTS, SessionEventLog, SessionManifest, TurnIndex, TurnIndexEntry};
+pub use event_log::{
+    DEFAULT_MAX_EVENTS, EvictionSummaryHook, SessionEventLog, SessionManifest, TurnIndex, TurnIndexEntry,
+};
 pub use migration::{MigrationReport, migrate_legacy};
 pub use progress::{
     GoalClassifierVerdict, GoalEvent, GoalHistoryEntry, GoalOrchestration, GoalPauseReason, GoalPhase, GoalStatus,
@@ -82,12 +84,23 @@ pub fn session_directory(workspace: &Path, session_id: &str) -> PathBuf {
 
 /// Open (creating if necessary) the event log for a session.
 ///
-/// This is the canonical entry point for recording a session's events. The
-/// returned [`SessionEventLog`] is cheap to clone (internally `Arc`-free but the
-/// file handle is shared via an internal mutex) and supports concurrent
-/// `append` calls from the runloop's event sink.
+/// This is the canonical entry point for recording a session's events. Multiple
+/// handles opened for the same session share an `Arc`-backed file and state,
+/// allowing concurrent `append` calls from the runloop's event sink to use one
+/// coordinated turn index.
 pub fn open(workspace: &Path, session_id: &str, max_events: usize) -> Result<SessionEventLog, SessionStoreError> {
     SessionEventLog::open(workspace, session_id, max_events)
+}
+
+/// Open a session log with a callback that persists summaries before cap
+/// eviction. A callback failure leaves the canonical event log unchanged.
+pub fn open_with_eviction_summary(
+    workspace: &Path,
+    session_id: &str,
+    max_events: usize,
+    eviction_summary_hook: EvictionSummaryHook,
+) -> Result<SessionEventLog, SessionStoreError> {
+    SessionEventLog::open_with_eviction_summary(workspace, session_id, max_events, eviction_summary_hook)
 }
 
 /// Ensure a session-store directory exists with private permissions.

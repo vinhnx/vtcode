@@ -16,8 +16,8 @@ an in-memory fake executor.
 |---|---|
 | `task` | Data model: `EvalTask`, `EvalCategory`, `RunOutcome`, `EvalRunResult` |
 | `suite` | `EvalSuite` — a named set of tasks with an `attempts` count |
-| `metric` | `EvalMetric` and `compute_metric` / `aggregate_metrics` / `pass_at_k` / `pass_all_k` |
-| `executor` | `EvalExecutor` trait + `run_suite` pure orchestration |
+| `metric` | `EvalMetric` and combinatorial `pass@k`, independent `pass^k`, and `aggregate_metrics` |
+| `executor` | `EvalExecutor` trait + bounded `run_suite_with_options` orchestration |
 | `environment` | `EnvironmentProbe` checks: `CommandProbe`, `FileExistsProbe`, `GitCleanProbe` |
 | `report` | `EvalReport` / `SuiteReport` / `TaskReport` + `to_markdown` renderer |
 | `trace_analyzer` | Privacy-preserving JSONL summaries for DeepSeek and VT Code harness traces |
@@ -27,11 +27,13 @@ an in-memory fake executor.
 - **`EvalTask`** — a prompt plus `verify_commands` and an optional `timeout_secs`.
   `category` is `Capability` or `Regression`.
 - **`RunOutcome`** — `Pass`, `Fail`, or `Error` for a single task attempt.
-- **`EvalMetric`** — `pass_at_k` (fraction of runs that passed) and `pass_all_k`
-  (1.0 only if every run passed), plus raw `passed_runs` / `total_runs`.
+- **`EvalMetric`** — combinatorial `pass_at_k`, independent reliability `pass_power_k`
+  (`(passed / attempts)^k`), and `pass_all_k`, averaged per task. It also carries
+  the selected `k` and raw `passed_runs` / `total_runs`.
 - **`EvalExecutor`** — the trait boundary. Implementors own "run this task" semantics
-  (drive the agent, apply environment probes, grade the result). `run_suite` only
-  calls `execute_task`.
+  (drive the agent, apply environment probes, grade the result). `run_suite` schedules
+  attempts with a default concurrency of two; `run_suite_with_options` makes the
+  bound and metric `k` explicit.
 
 `HarnessTraceSummary` provides aggregate-only trace facts: turns, bounded
 tool/error counts, latency, output byte totals, repetition, and token/cache
@@ -65,8 +67,10 @@ only when per-turn usage is absent, preventing double counting.
 
 ## Notes
 
-- `run_suite` performs no file I/O or trust checks; the caller owns configuration
-  and the `attempts >= 1` guardrail.
+- `run_suite` performs no file I/O or trust checks; the caller owns configuration,
+  while the scheduler rejects `attempts == 0` and invalid metric `k` values.
+- Reports sum known per-attempt costs and count unknown-pricing attempts separately;
+  unknown cost is never silently treated as a known zero.
 - Environment verification (`EnvironmentProbe`) is a separate concern from outcome
   grading — executor implementations decide whether and how to apply probes before
   returning a `RunOutcome`.

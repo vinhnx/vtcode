@@ -14,6 +14,50 @@ use super::{
 };
 pub use vtcode_commons::llm::{LLMError, LLMErrorMetadata};
 
+/// Generic effort levels supported by providers that advertise configurable
+/// reasoning without exposing model-specific catalog metadata.
+pub(crate) const GENERIC_REASONING_EFFORTS: &[&str] = &["low", "medium", "high"];
+
+/// Return the catalog's effort metadata while preserving the distinction
+/// between an unknown route and a known route that only exposes structured
+/// reasoning. An empty catalog list is authoritative: it means the route does
+/// not accept a configurable effort payload.
+pub(crate) fn catalog_reasoning_efforts(provider: &str, model: &str) -> Option<&'static [&'static str]> {
+    vtcode_config::models::model_catalog_entry(provider, model).map(|entry| entry.reasoning_efforts)
+}
+
+/// Resolve the catalog's exact effort list while retaining the explicit
+/// generic contract for provider routes that advertise effort support without
+/// a built-in model entry (for example, an OpenAI-compatible custom endpoint).
+pub(crate) fn catalog_or_generic_reasoning_efforts(provider: &str, model: &str) -> &'static [&'static str] {
+    catalog_reasoning_efforts(provider, model).unwrap_or(GENERIC_REASONING_EFFORTS)
+}
+
+/// Resolve catalog levels while allowing an explicitly configured custom route
+/// to advertise the shared generic effort contract. Unsupported unknown routes
+/// remain empty so request builders fail closed.
+pub(crate) fn catalog_or_explicit_reasoning_efforts(
+    provider: &str,
+    model: &str,
+    explicitly_supported: bool,
+) -> &'static [&'static str] {
+    catalog_reasoning_efforts(provider, model)
+        .or_else(|| explicitly_supported.then_some(GENERIC_REASONING_EFFORTS))
+        .unwrap_or(&[])
+}
+
+/// Resolve a model's catalog context window with a provider-specific fallback.
+///
+/// Provider adapters use this helper instead of maintaining independent model
+/// name tables. Explicit provider overrides remain the caller's responsibility
+/// and are applied before this lookup.
+pub(crate) fn catalog_context_window(provider: &str, model: &str, fallback: usize) -> usize {
+    vtcode_config::models::model_catalog_entry(provider, model)
+        .map(|entry| entry.context_window)
+        .filter(|context_window| *context_window > 0)
+        .unwrap_or(fallback)
+}
+
 /// Cached provider capabilities to reduce repeated trait method calls
 #[derive(Debug, Clone)]
 pub struct ProviderCapabilities {
@@ -42,7 +86,7 @@ impl ProviderCapabilities {
             model: model.to_string(),
             streaming: provider.supports_streaming(),
             reasoning: provider.supports_reasoning(model),
-            reasoning_effort: provider.supports_reasoning_effort(model),
+            reasoning_effort: !provider.supported_reasoning_efforts(model).is_empty(),
             tools: provider.supports_tools(model),
             parallel_tool_config: provider.supports_parallel_tool_config(model),
             structured_output: provider.supports_structured_output(model),
@@ -103,7 +147,7 @@ static CAPABILITY_CACHE: Lazy<RwLock<FxHashMap<CompactStr, ProviderCapabilities>
 
 /// Extract and cache provider capabilities for a given provider and model
 pub fn get_cached_capabilities(provider: &dyn LLMProvider, model: &str) -> ProviderCapabilities {
-    let cache_key = format_compact!("{}::{}", provider.name(), model);
+    let cache_key = format_compact!("{}::{}::{}", provider.name(), model, provider.effective_context_size(model));
 
     // Check if already cached
     if let Ok(cache) = CAPABILITY_CACHE.read()
@@ -188,10 +232,7 @@ pub trait LLMProvider: Send + Sync {
         if !self.supports_reasoning_effort(model) {
             return &[];
         }
-        vtcode_config::models::model_catalog_entry(self.name(), model)
-            .map(|entry| entry.reasoning_efforts)
-            .filter(|levels| !levels.is_empty())
-            .unwrap_or(&["low", "medium", "high"])
+        catalog_or_generic_reasoning_efforts(self.name(), model)
     }
 
     /// Provider/model-specific sampling parameter overrides.
@@ -295,10 +336,13 @@ pub trait LLMProvider: Send + Sync {
         )
     }
 
-    /// Get the effective context window size for a model
-    fn effective_context_size(&self, _model: &str) -> usize {
-        // Default to 128k context window (common baseline)
-        128_000
+    /// Get the effective context window size for a model.
+    ///
+    /// Curated catalog capacity is the default for providers that do not have
+    /// a narrower route-specific limit. Adapters with an explicit endpoint
+    /// ceiling can still override this method and keep that ceiling intact.
+    fn effective_context_size(&self, model: &str) -> usize {
+        catalog_context_window(self.name(), model, 128_000)
     }
 
     /// Compact conversation history using provider-native Responses `/compact`
@@ -371,4 +415,164 @@ pub trait LLMProvider: Send + Sync {
 
     /// Validate request for this provider
     fn validate_request(&self, request: &LLMRequest) -> Result<(), LLMError>;
+}
+
+/// Provider-local context capacity discovered for the selected model.
+/// All transport and capability behavior remains delegated to the underlying provider.
+pub struct ContextWindowProvider {
+    inner: Box<dyn LLMProvider>,
+    model: CompactStr,
+    context_window: usize,
+}
+
+impl ContextWindowProvider {
+    /// Unknown/zero metadata preserves the backend's usable capacity.
+    pub fn wrap(inner: Box<dyn LLMProvider>, model: &str, context_window: Option<usize>) -> Box<dyn LLMProvider> {
+        match context_window.filter(|value| *value > 0) {
+            Some(context_window) => Box::new(Self { inner, model: model.into(), context_window }),
+            None => inner,
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for ContextWindowProvider {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn backend_kind(&self) -> BackendKind {
+        self.inner.backend_kind()
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.inner.supports_streaming()
+    }
+
+    fn supports_non_streaming(&self, model: &str) -> bool {
+        self.inner.supports_non_streaming(model)
+    }
+
+    fn supports_reasoning(&self, model: &str) -> bool {
+        self.inner.supports_reasoning(model)
+    }
+
+    fn supports_reasoning_effort(&self, model: &str) -> bool {
+        self.inner.supports_reasoning_effort(model)
+    }
+
+    fn supported_reasoning_efforts(&self, model: &str) -> &'static [&'static str] {
+        self.inner.supported_reasoning_efforts(model)
+    }
+
+    fn sampling_overrides(&self, model: &str) -> SamplingOverrides {
+        self.inner.sampling_overrides(model)
+    }
+
+    fn supports_tools(&self, model: &str) -> bool {
+        self.inner.supports_tools(model)
+    }
+
+    fn supports_parallel_tool_config(&self, model: &str) -> bool {
+        self.inner.supports_parallel_tool_config(model)
+    }
+
+    fn supports_structured_output(&self, model: &str) -> bool {
+        self.inner.supports_structured_output(model)
+    }
+
+    fn supports_context_caching(&self, model: &str) -> bool {
+        self.inner.supports_context_caching(model)
+    }
+
+    fn supports_vision(&self, model: &str) -> bool {
+        self.inner.supports_vision(model)
+    }
+
+    fn supports_responses_compaction(&self, model: &str) -> bool {
+        self.inner.supports_responses_compaction(model)
+    }
+
+    fn supports_native_allowed_tools(&self, model: &str) -> bool {
+        self.inner.supports_native_allowed_tools(model)
+    }
+
+    fn supports_context_edits(&self, model: &str) -> bool {
+        self.inner.supports_context_edits(model)
+    }
+
+    fn supports_turn_scoped_system_messages(&self, model: &str) -> bool {
+        self.inner.supports_turn_scoped_system_messages(model)
+    }
+
+    fn supports_manual_openai_compaction(&self, model: &str) -> bool {
+        self.inner.supports_manual_openai_compaction(model)
+    }
+
+    fn supports_native_inline_compaction(&self, model: &str) -> bool {
+        self.inner.supports_native_inline_compaction(model)
+    }
+
+    fn manual_openai_compaction_unavailable_message(&self, model: &str) -> String {
+        self.inner.manual_openai_compaction_unavailable_message(model)
+    }
+
+    fn effective_context_size(&self, model: &str) -> usize {
+        let requested_model = if model.trim().is_empty() {
+            self.model.as_str()
+        } else {
+            model
+        };
+        if requested_model == self.model.as_str() {
+            self.context_window
+        } else {
+            self.inner.effective_context_size(requested_model)
+        }
+    }
+
+    async fn compact_history(&self, model: &str, history: &[Message]) -> Result<Vec<Message>, LLMError> {
+        self.inner.compact_history(model, history).await
+    }
+
+    async fn compact_history_with_options(
+        &self,
+        model: &str,
+        history: &[Message],
+        options: &ResponsesCompactionOptions,
+    ) -> Result<Vec<Message>, LLMError> {
+        self.inner.compact_history_with_options(model, history, options).await
+    }
+
+    async fn generate(&self, request: LLMRequest) -> Result<LLMResponse, LLMError> {
+        self.inner.generate(request).await
+    }
+
+    async fn stream(&self, request: LLMRequest) -> Result<LLMStream, LLMError> {
+        self.inner.stream(request).await
+    }
+
+    async fn stream_normalized(&self, request: LLMRequest) -> Result<LLMNormalizedStream, LLMError> {
+        self.inner.stream_normalized(request).await
+    }
+
+    #[cfg(feature = "copilot")]
+    fn start_copilot_prompt_session<'a>(
+        &'a self,
+        request: LLMRequest,
+        tools: &'a [super::ToolDefinition],
+    ) -> Option<crate::copilot::CopilotPromptSessionFuture<'a>> {
+        self.inner.start_copilot_prompt_session(request, tools)
+    }
+
+    fn supported_models(&self) -> Vec<String> {
+        self.inner.supported_models()
+    }
+
+    async fn get_balance(&self) -> Result<Option<vtcode_commons::llm::BalanceInfo>, LLMError> {
+        self.inner.get_balance().await
+    }
+
+    fn validate_request(&self, request: &LLMRequest) -> Result<(), LLMError> {
+        self.inner.validate_request(request)
+    }
 }

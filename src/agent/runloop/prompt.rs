@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use vtcode_core::config::loader::VTCodeConfig;
-use vtcode_core::config::types::AgentConfig as CoreAgentConfig;
+use vtcode_core::config::types::{AgentConfig as CoreAgentConfig, ReasoningEffortLevel};
 use vtcode_core::context::{ConversationMemory, EntityResolver, WorkspaceState};
 use vtcode_core::llm::{
     LightweightFeature, collect_single_response, create_provider_for_model_route, provider as uni,
@@ -103,9 +103,22 @@ async fn try_refine_prompt_with_route(
         return Ok(None);
     };
     let refiner = create_provider_for_model_route(route, cfg, Some(vt_cfg))?;
-    let supports_effort = refiner.supports_reasoning_effort(&route.model);
-    let reasoning_effort = if supports_effort {
-        Some(vt_cfg.agent.reasoning_effort)
+    let reasoning_effort = if vt_cfg.agent.reasoning_effort != ReasoningEffortLevel::None {
+        let mapping = vtcode_core::llm::reasoning_effort::ReasoningEffortMapper::resolve(
+            refiner.as_ref(),
+            &route.model,
+            vt_cfg.agent.reasoning_effort,
+            vt_cfg.agent.allow_reasoning_effort_downgrade,
+        )?;
+        if mapping.degraded() {
+            tracing::warn!(
+                requested = %mapping.requested,
+                effective = %mapping.effective,
+                model = %route.model,
+                "Prompt-refinement reasoning effort explicitly downgraded"
+            );
+        }
+        Some(mapping.effective)
     } else {
         None
     };

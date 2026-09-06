@@ -1,291 +1,158 @@
 use rig::providers::gemini::completion::gemini_api_types::ThinkingConfig;
-use rig::providers::openai;
 use serde_json::{Value, json};
-use vtcode_config::constants::models::openai as openai_models;
 use vtcode_config::models::Provider;
 use vtcode_config::types::ReasoningEffortLevel;
 
-/// Internal bridge for Rig-backed provider reasoning-parameter construction.
+/// Internal bridge for provider reasoning-parameter construction.
 #[derive(Debug, Clone)]
 pub struct RigProviderCapabilities {
     provider: Provider,
-    model: String,
+    model: compact_str::CompactString,
 }
 
 impl RigProviderCapabilities {
     #[must_use]
     pub fn new(provider: Provider, model: impl Into<String>) -> Self {
-        Self { provider, model: model.into() }
+        Self { provider, model: model.into().into() }
     }
 
-    /// Convert a VT Code reasoning effort level to provider-specific parameters
-    /// using rig-core data structures. The resulting JSON payload can be merged
-    /// into provider requests when supported.
-    #[must_use]
-    pub fn reasoning_parameters(&self, effort: ReasoningEffortLevel) -> Option<Value> {
-        match self.provider {
-            Provider::OpenAI => {
-                let mut reasoning = openai::responses_api::Reasoning::new();
-                let mapped = match effort {
-                    ReasoningEffortLevel::None | ReasoningEffortLevel::Unknown => {
-                        // GPT-6 Astra does not support the `none` effort; start with `low`.
-                        // https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters
-                        if openai_models::is_gpt6_astra_model(&self.model) {
-                            return Some(json!({ "effort": "low" }));
-                        }
-                        return None;
-                    }
-                    ReasoningEffortLevel::Minimal => {
-                        if openai_models::is_gpt6_astra_model(&self.model) {
-                            return Some(json!({ "effort": "low" }));
-                        }
-                        let effort = if is_gpt5_codex_model(&self.model) {
-                            "low"
-                        } else {
-                            "minimal"
-                        };
-                        return Some(json!({ "effort": effort }));
-                    }
-                    ReasoningEffortLevel::Low => openai::responses_api::ReasoningEffort::Low,
-                    ReasoningEffortLevel::Medium => openai::responses_api::ReasoningEffort::Medium,
-                    ReasoningEffortLevel::High => openai::responses_api::ReasoningEffort::High,
-                    ReasoningEffortLevel::XHigh => return Some(json!({ "effort": "xhigh" })),
-                    ReasoningEffortLevel::Max => return Some(json!({ "effort": "max" })),
-                };
-                reasoning = reasoning.with_effort(mapped);
-                serde_json::to_value(reasoning).ok()
-            }
+    /// Serialize an already mapped effort without changing its fidelity.
+    /// Unsupported controls are returned as an invalid request so callers
+    /// cannot silently drop or coerce the requested effort.
+    pub fn reasoning_parameters(
+        &self,
+        effort: ReasoningEffortLevel,
+    ) -> Result<Option<Value>, crate::provider::LLMError> {
+        let supported = crate::provider::catalog_reasoning_efforts(self.provider.as_ref(), &self.model)
+            .or_else(|| (self.provider == Provider::Anthropic).then_some(crate::provider::GENERIC_REASONING_EFFORTS))
+            .unwrap_or(&[]);
+        self.reasoning_parameters_for_supported_efforts(effort, supported)
+    }
+
+    /// Serialize an effort against a provider-resolved capability list.
+    ///
+    /// Built-in model routes should use [`Self::reasoning_parameters`], which
+    /// validates against the catalog. Configured custom routes can instead
+    /// pass the Provider trait's advertised levels so strict validation does
+    /// not reject a capability that was explicitly supplied by the user.
+    pub fn reasoning_parameters_for_supported_efforts(
+        &self,
+        effort: ReasoningEffortLevel,
+        supported: &[&str],
+    ) -> Result<Option<Value>, crate::provider::LLMError> {
+        if effort == ReasoningEffortLevel::None {
+            return Ok(None);
+        }
+        let _mapping =
+            crate::reasoning_effort::ReasoningEffortMapper::map(effort, supported, false).map_err(|error| {
+                crate::provider::LLMError::InvalidRequest { message: error.to_string(), metadata: None }
+            })?;
+        let payload = match self.provider {
+            Provider::OpenAI => Some(json!({ "effort": effort.as_str() })),
             Provider::Gemini => {
-                let include_thoughts = matches!(
-                    effort,
-                    ReasoningEffortLevel::High | ReasoningEffortLevel::XHigh | ReasoningEffortLevel::Max
-                );
                 let budget = match effort {
-                    ReasoningEffortLevel::None | ReasoningEffortLevel::Unknown => return None,
                     ReasoningEffortLevel::Minimal => 16,
                     ReasoningEffortLevel::Low => 64,
                     ReasoningEffortLevel::Medium => 128,
-                    ReasoningEffortLevel::High | ReasoningEffortLevel::XHigh | ReasoningEffortLevel::Max => 256,
+                    ReasoningEffortLevel::High => 256,
+                    _ => {
+                        return Err(crate::provider::LLMError::InvalidRequest {
+                            message: format!("Gemini does not serialize reasoning effort `{effort}`"),
+                            metadata: None,
+                        });
+                    }
                 };
                 let config = ThinkingConfig {
                     thinking_budget: Some(budget),
                     thinking_level: None,
-                    include_thoughts: Some(include_thoughts),
+                    include_thoughts: Some(effort == ReasoningEffortLevel::High),
                 };
                 serde_json::to_value(config)
                     .ok()
                     .map(|value| json!({ "thinking_config": value }))
             }
-            Provider::HuggingFace => match effort {
-                ReasoningEffortLevel::None | ReasoningEffortLevel::Unknown => None,
-                ReasoningEffortLevel::Minimal => Some(json!({ "reasoning_effort": "minimal" })),
-                ReasoningEffortLevel::Low => Some(json!({ "reasoning_effort": "low" })),
-                ReasoningEffortLevel::Medium => Some(json!({ "reasoning_effort": "medium" })),
-                ReasoningEffortLevel::High | ReasoningEffortLevel::XHigh | ReasoningEffortLevel::Max => {
-                    Some(json!({ "reasoning_effort": "high" }))
-                }
-            },
-            // DeepSeek native levels are `low`, `high`, and `max`.
-            Provider::DeepSeek => match effort {
-                ReasoningEffortLevel::None | ReasoningEffortLevel::Unknown => None,
-                ReasoningEffortLevel::Minimal | ReasoningEffortLevel::Low => {
-                    Some(json!({"thinking": {"type": "enabled"}, "reasoning_effort": "low"}))
-                }
-                ReasoningEffortLevel::Medium | ReasoningEffortLevel::High | ReasoningEffortLevel::XHigh => {
-                    Some(json!({"thinking": {"type": "enabled"}, "reasoning_effort": "high"}))
-                }
-                ReasoningEffortLevel::Max => Some(json!({"thinking": {"type": "enabled"}, "reasoning_effort": "max"})),
-            },
-            Provider::Meta => match effort {
-                ReasoningEffortLevel::None | ReasoningEffortLevel::Unknown => None,
-                ReasoningEffortLevel::Minimal => Some(json!({ "reasoning_effort": "minimal" })),
-                ReasoningEffortLevel::Low => Some(json!({ "reasoning_effort": "low" })),
-                ReasoningEffortLevel::Medium => Some(json!({ "reasoning_effort": "medium" })),
-                ReasoningEffortLevel::High => Some(json!({ "reasoning_effort": "high" })),
-                ReasoningEffortLevel::XHigh | ReasoningEffortLevel::Max => Some(json!({ "reasoning_effort": "xhigh" })),
-            },
-            Provider::Minimax => None,
-            Provider::Ollama => None,
-            Provider::LlamaCpp => None,
-            // Z.AI native levels are `low`, `high`, and `max` (`xhigh` aliases to `max`).
-            Provider::ZAI => match effort {
-                ReasoningEffortLevel::None | ReasoningEffortLevel::Unknown => None,
-                ReasoningEffortLevel::Minimal | ReasoningEffortLevel::Low => Some(json!({
-                    "thinking": { "type": "enabled" },
-                    "reasoning_effort": "low"
-                })),
-                ReasoningEffortLevel::Medium | ReasoningEffortLevel::High => Some(json!({
-                    "thinking": { "type": "enabled" },
-                    "reasoning_effort": "high"
-                })),
-                ReasoningEffortLevel::XHigh | ReasoningEffortLevel::Max => Some(json!({
-                    "thinking": { "type": "enabled" },
-                    "reasoning_effort": "max"
-                })),
-            },
-            Provider::StepFun => match effort {
-                ReasoningEffortLevel::None | ReasoningEffortLevel::Unknown => None,
-                ReasoningEffortLevel::Minimal | ReasoningEffortLevel::Low => Some(json!({ "reasoning_effort": "low" })),
-                ReasoningEffortLevel::Medium => Some(json!({ "reasoning_effort": "medium" })),
-                ReasoningEffortLevel::High | ReasoningEffortLevel::XHigh | ReasoningEffortLevel::Max => {
-                    Some(json!({ "reasoning_effort": "high" }))
-                }
-            },
-            Provider::Evolink => match effort {
-                ReasoningEffortLevel::None | ReasoningEffortLevel::Unknown => None,
-                ReasoningEffortLevel::Minimal | ReasoningEffortLevel::Low => Some(json!({ "reasoning_effort": "low" })),
-                ReasoningEffortLevel::Medium => Some(json!({ "reasoning_effort": "medium" })),
-                ReasoningEffortLevel::High | ReasoningEffortLevel::XHigh | ReasoningEffortLevel::Max => {
-                    Some(json!({ "reasoning_effort": "high" }))
-                }
-            },
-            _ => None,
-        }
+            Provider::DeepSeek | Provider::ZAI => Some(json!({
+                "thinking": { "type": "enabled" }, "reasoning_effort": effort.as_str()
+            })),
+            Provider::HuggingFace | Provider::Meta | Provider::StepFun | Provider::Evolink => {
+                Some(json!({ "reasoning_effort": effort.as_str() }))
+            }
+            // OpenRouter follows the OpenAI-compatible `reasoning.effort`
+            // envelope, including for custom routes whose capabilities are
+            // supplied by the Provider trait rather than the built-in catalog.
+            Provider::OpenRouter => Some(json!({ "effort": effort.as_str() })),
+            Provider::Anthropic => None,
+            _ => {
+                return Err(crate::provider::LLMError::InvalidRequest {
+                    message: format!("Provider `{}` does not serialize reasoning effort", self.provider.as_ref()),
+                    metadata: None,
+                });
+            }
+        };
+        Ok(payload)
     }
-}
-
-fn is_gpt5_codex_model(model: &str) -> bool {
-    model == "gpt-5-codex" || (model.starts_with("gpt-5.") && model.contains("codex"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::RigProviderCapabilities;
-    use vtcode_config::models::Provider;
-    use vtcode_config::types::ReasoningEffortLevel;
+    use super::*;
 
     #[test]
-    fn rig_capabilities_generate_reasoning_payload_for_supported_provider() {
-        let payload = RigProviderCapabilities::new(Provider::ZAI, "glm-5")
-            .reasoning_parameters(ReasoningEffortLevel::Medium)
-            .expect("reasoning payload");
-
-        assert_eq!(payload["thinking"]["type"], "enabled");
-        assert_eq!(payload["reasoning_effort"], "high");
-    }
-
-    #[test]
-    fn rig_capabilities_preserve_reasoning_payload_for_openai() {
-        let payload = RigProviderCapabilities::new(Provider::OpenAI, "gpt-5")
-            .reasoning_parameters(ReasoningEffortLevel::Medium)
-            .expect("reasoning payload");
-
-        assert_eq!(payload["effort"], "medium");
-
-        let codex_payload = RigProviderCapabilities::new(Provider::OpenAI, "gpt-5-codex")
-            .reasoning_parameters(ReasoningEffortLevel::Minimal)
-            .expect("reasoning payload");
-
-        assert_eq!(codex_payload["effort"], "low");
-    }
-
-    #[test]
-    fn rig_capabilities_preserve_reasoning_payload_for_gemini() {
-        let payload = RigProviderCapabilities::new(Provider::Gemini, "gemini-2.5-pro")
-            .reasoning_parameters(ReasoningEffortLevel::High)
-            .expect("reasoning payload");
-
-        assert_eq!(payload["thinking_config"]["thinkingBudget"], 256);
-        assert_eq!(payload["thinking_config"]["includeThoughts"], true);
-    }
-
-    #[test]
-    fn rig_capabilities_preserve_reasoning_payload_for_anthropic() {
-        assert!(
-            RigProviderCapabilities::new(Provider::Anthropic, "claude-sonnet-4-5")
-                .reasoning_parameters(ReasoningEffortLevel::High)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn rig_capabilities_preserve_reasoning_payload_for_deepseek() {
-        let high_payload = RigProviderCapabilities::new(Provider::DeepSeek, "deepseek-chat")
-            .reasoning_parameters(ReasoningEffortLevel::Medium)
-            .expect("reasoning payload");
-
-        assert_eq!(high_payload["thinking"]["type"], "enabled");
-        assert_eq!(high_payload["reasoning_effort"], "high");
-
-        let low_payload = RigProviderCapabilities::new(Provider::DeepSeek, "deepseek-chat")
-            .reasoning_parameters(ReasoningEffortLevel::Low)
-            .expect("reasoning payload");
-
-        assert_eq!(low_payload["thinking"]["type"], "enabled");
-        assert_eq!(low_payload["reasoning_effort"], "low");
-
-        // `xhigh` aliases to `high`; only `max` requests maximum reasoning.
-        let xhigh_payload = RigProviderCapabilities::new(Provider::DeepSeek, "deepseek-chat")
-            .reasoning_parameters(ReasoningEffortLevel::XHigh)
-            .expect("reasoning payload");
-
-        assert_eq!(xhigh_payload["thinking"]["type"], "enabled");
-        assert_eq!(xhigh_payload["reasoning_effort"], "high");
-
-        let max_payload = RigProviderCapabilities::new(Provider::DeepSeek, "deepseek-chat")
-            .reasoning_parameters(ReasoningEffortLevel::Max)
-            .expect("reasoning payload");
-
-        assert_eq!(max_payload["thinking"]["type"], "enabled");
-        assert_eq!(max_payload["reasoning_effort"], "max");
-    }
-
-    #[test]
-    fn rig_capabilities_map_zai_efforts_to_native_levels() {
-        let low_payload = RigProviderCapabilities::new(Provider::ZAI, "glm-5.3")
-            .reasoning_parameters(ReasoningEffortLevel::Low)
-            .expect("reasoning payload");
-
-        assert_eq!(low_payload["thinking"]["type"], "enabled");
-        assert_eq!(low_payload["reasoning_effort"], "low");
-
-        let max_payload = RigProviderCapabilities::new(Provider::ZAI, "glm-5.3")
-            .reasoning_parameters(ReasoningEffortLevel::Max)
-            .expect("reasoning payload");
-
-        assert_eq!(max_payload["thinking"]["type"], "enabled");
-        assert_eq!(max_payload["reasoning_effort"], "max");
-
-        // `xhigh` is a compatibility alias for the native `max` level.
-        let xhigh_payload = RigProviderCapabilities::new(Provider::ZAI, "glm-5.3")
-            .reasoning_parameters(ReasoningEffortLevel::XHigh)
-            .expect("reasoning payload");
-
-        assert_eq!(xhigh_payload["reasoning_effort"], "max");
-    }
-
-    #[test]
-    fn rig_capabilities_coerce_unsupported_efforts_to_low_for_gpt6_astra() {
-        for effort in [ReasoningEffortLevel::None, ReasoningEffortLevel::Minimal] {
-            let payload = RigProviderCapabilities::new(Provider::OpenAI, "gpt-6-astra")
-                .reasoning_parameters(effort)
-                .expect("astra coerces unsupported effort to low");
-
-            assert_eq!(payload["effort"], "low");
+    fn rig_serialization_preserves_exact_catalog_effort() {
+        for (provider, model, key) in [
+            (Provider::OpenAI, "gpt-6-astra", "effort"),
+            (Provider::ZAI, "glm-5.3", "reasoning_effort"),
+        ] {
+            for effort in [
+                ReasoningEffortLevel::Low,
+                ReasoningEffortLevel::High,
+                ReasoningEffortLevel::Max,
+            ] {
+                let payload = RigProviderCapabilities::new(provider, model)
+                    .reasoning_parameters(effort)
+                    .expect("reasoning serialization should not fail")
+                    .expect("catalog-supported effort");
+                assert_eq!(payload[key], effort.as_str());
+            }
         }
-
-        let medium = RigProviderCapabilities::new(Provider::OpenAI, "gpt-6-astra")
-            .reasoning_parameters(ReasoningEffortLevel::Medium)
-            .expect("astra keeps supported effort");
-
-        assert_eq!(medium["effort"], "medium");
     }
 
     #[test]
-    fn rig_capabilities_preserve_reasoning_payload_for_openrouter() {
-        assert!(
-            RigProviderCapabilities::new(Provider::OpenRouter, "openai/gpt-5")
-                .reasoning_parameters(ReasoningEffortLevel::High)
-                .is_none()
-        );
+    fn rig_serialization_rejects_unsupported_effort_without_aliasing() {
+        for (provider, model, effort) in [
+            (Provider::OpenAI, "gpt-6-astra", ReasoningEffortLevel::Minimal),
+            (Provider::ZAI, "glm-5.3", ReasoningEffortLevel::XHigh),
+            (Provider::Gemini, "gemini-3.7-flash", ReasoningEffortLevel::Max),
+            (Provider::OpenAI, "unknown-model", ReasoningEffortLevel::High),
+            (Provider::OpenRouter, "meta/muse-spark-1.2", ReasoningEffortLevel::High),
+        ] {
+            assert!(
+                RigProviderCapabilities::new(provider, model)
+                    .reasoning_parameters(effort)
+                    .is_err()
+            );
+        }
     }
 
     #[test]
-    fn rig_capabilities_skip_reasoning_payload_for_unsupported_provider() {
+    fn rig_serialization_accepts_explicit_custom_capability_levels() {
+        let payload = RigProviderCapabilities::new(Provider::OpenAI, "custom-route")
+            .reasoning_parameters_for_supported_efforts(ReasoningEffortLevel::High, &["low", "medium", "high"])
+            .expect("explicit provider capability should validate")
+            .expect("OpenRouter should serialize reasoning effort");
+        assert_eq!(payload["effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_custom_routes_use_generic_efforts_without_silent_drops() {
+        let payload = RigProviderCapabilities::new(Provider::Anthropic, "custom-route")
+            .reasoning_parameters(ReasoningEffortLevel::High)
+            .expect("generic custom effort should validate");
+        assert!(payload.is_none(), "Anthropic encodes this effort in output_config");
         assert!(
-            RigProviderCapabilities::new(Provider::Ollama, "qwen")
-                .reasoning_parameters(ReasoningEffortLevel::High)
-                .is_none()
+            RigProviderCapabilities::new(Provider::Anthropic, "custom-route")
+                .reasoning_parameters(ReasoningEffortLevel::Max)
+                .is_err()
         );
     }
 }

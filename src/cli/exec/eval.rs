@@ -8,7 +8,8 @@
 use crate::startup::require_full_auto_workspace_trust;
 use anyhow::{Context, Result, bail};
 use std::path::Path;
-use std::time::Instant;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use vtcode_core::cli::input_hardening::validate_agent_safe_text;
 use vtcode_core::config::VTCodeConfig;
 use vtcode_core::config::models::ModelId;
@@ -17,10 +18,11 @@ use vtcode_core::core::agent::runner::{AgentRunner, RunnerSettings};
 use vtcode_core::core::agent::task::{ContextItem, Task, TaskOutcome};
 use vtcode_core::core::agent::types::AgentType;
 use vtcode_core::core::threads::ThreadBootstrap;
+use vtcode_core::exec::events::ThreadEvent;
 use vtcode_eval::{
-    EvalRunResult, EvalSuite, EvalTask, RunOutcome,
+    EvalRunOptions, EvalRunResult, EvalSuite, EvalTask, HarnessTraceSummary, RunOutcome, analyze_jsonl,
     environment::{CommandProbe, EnvironmentProbe},
-    run_suite,
+    run_suite_with_options,
 };
 
 use super::ExecCommandKind;
@@ -56,7 +58,7 @@ pub(crate) async fn handle_eval_command(
     let allowed_tools = vt_cfg.automation.full_auto.allowed_tools.clone();
     let executor = AgentRunnerExecutor::new(config, vt_cfg, &allowed_tools);
 
-    let report = run_suite(&executor, &suite).await?;
+    let report = run_suite_with_options(&executor, &suite, EvalRunOptions::default()).await?;
 
     let markdown = report.to_markdown();
     if let Some(path) = output_path {
@@ -76,6 +78,7 @@ struct AgentRunnerExecutor {
     config: CoreAgentConfig,
     vt_cfg: VTCodeConfig,
     allowed_tools: Vec<String>,
+    workspace_root: PathBuf,
 }
 
 impl AgentRunnerExecutor {
@@ -84,6 +87,7 @@ impl AgentRunnerExecutor {
             config: config.clone(),
             vt_cfg: vt_cfg.clone(),
             allowed_tools: allowed_tools.to_vec(),
+            workspace_root: config.workspace.clone(),
         }
     }
 }
@@ -91,7 +95,59 @@ impl AgentRunnerExecutor {
 #[async_trait::async_trait]
 impl vtcode_eval::EvalExecutor for AgentRunnerExecutor {
     async fn execute_task(&self, eval_task: &EvalTask) -> Result<EvalRunResult> {
-        Ok(run_eval_task(&self.config, &self.vt_cfg, eval_task, &self.allowed_tools).await)
+        Ok(run_eval_task(
+            &self.config,
+            &self.vt_cfg,
+            eval_task,
+            &self.allowed_tools,
+            &self.config.workspace,
+            &self.workspace_root,
+            1,
+        )
+        .await)
+    }
+
+    async fn execute_task_attempt(&self, eval_task: &EvalTask, attempt: u32) -> Result<EvalRunResult> {
+        let workspace_root = self.workspace_root.clone();
+        let worktree_name = format!("eval-{}-{}-{}", uuid::Uuid::new_v4().simple(), eval_task.id, attempt);
+        let worktree_path = tokio::task::spawn_blocking(move || {
+            vtcode_core::git::WorktreeManager::new(workspace_root).create_from_current(&worktree_name)
+        })
+        .await
+        .context("eval worktree creation task failed")??;
+        let mut config = self.config.clone();
+        config.workspace = worktree_path.clone();
+        let mut result = run_eval_task(
+            &config,
+            &self.vt_cfg,
+            eval_task,
+            &self.allowed_tools,
+            &worktree_path,
+            &self.workspace_root,
+            attempt,
+        )
+        .await;
+        result.attempt = attempt;
+        let cleanup_name = worktree_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        let root = self.workspace_root.clone();
+        match tokio::task::spawn_blocking(move || vtcode_core::git::WorktreeManager::new(root).remove(&cleanup_name))
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                result.outcome = RunOutcome::Error;
+                result.error_message = Some(format!("eval worktree cleanup failed: {error:#}"));
+            }
+            Err(error) => {
+                result.outcome = RunOutcome::Error;
+                result.error_message = Some(format!("eval worktree cleanup task failed: {error}"));
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -101,12 +157,15 @@ async fn run_eval_task(
     vt_cfg: &VTCodeConfig,
     eval_task: &EvalTask,
     allowed_tools: &[String],
+    workspace: &Path,
+    trace_root: &Path,
+    attempt: u32,
 ) -> EvalRunResult {
     let start = Instant::now();
-    let session_id = format!("eval-{}-attempt", eval_task.id);
+    let session_id = format!("eval-{}-attempt-{attempt}", eval_task.id);
 
     if let Err(e) = validate_agent_safe_text("eval_task.prompt", &eval_task.prompt) {
-        return eval_error(&eval_task.id, start, format!("Prompt validation failed: {e}"));
+        return eval_error(&eval_task.id, start, attempt, format!("Prompt validation failed: {e}"));
     }
 
     let model_id = match ModelId::from_config(
@@ -116,14 +175,14 @@ async fn run_eval_task(
         &vt_cfg.custom_providers,
     ) {
         Ok(id) => id,
-        Err(e) => return eval_error(&eval_task.id, start, format!("Model not recognized: {e}")),
+        Err(e) => return eval_error(&eval_task.id, start, attempt, format!("Model not recognized: {e}")),
     };
 
     let runner_result = AgentRunner::new_with_bootstrap(
         AgentType::Single,
         model_id,
         config.api_key.clone(),
-        config.workspace.clone(),
+        workspace.to_path_buf(),
         session_id.clone(),
         RunnerSettings {
             reasoning_effort: Some(config.reasoning_effort),
@@ -138,19 +197,13 @@ async fn run_eval_task(
 
     let mut runner = match runner_result {
         Ok(r) => r,
-        Err(e) => return eval_error(&eval_task.id, start, format!("Runner creation failed: {e}")),
+        Err(e) => return eval_error(&eval_task.id, start, attempt, format!("Runner creation failed: {e}")),
     };
 
     runner.enable_full_auto(allowed_tools).await;
     runner.set_quiet(true);
 
-    let ts = task_spec(
-        &ExecCommandKind::Eval {
-            suite_path: std::path::PathBuf::new(),
-            output_path: None,
-        },
-        false,
-    );
+    let ts = task_spec(&ExecCommandKind::Eval { suite_path: PathBuf::new(), output_path: None }, false);
     let task = Task {
         id: eval_task.id.clone(),
         title: eval_task.name.clone(),
@@ -158,11 +211,41 @@ async fn run_eval_task(
         instructions: Some(ts.instructions.to_string()),
     };
 
-    let exec_result = runner.execute_task_with_retry(&task, &[] as &[ContextItem], 1).await;
+    let exec_result = if let Some(timeout_secs) = eval_task.timeout_secs {
+        match tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            runner.execute_task_with_retry(&task, &[] as &[ContextItem], 1),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(vtcode_core::error::VtCodeError::execution(
+                vtcode_core::error::ErrorCode::Timeout,
+                format!("evaluation task exceeded timeout of {timeout_secs}s"),
+            )),
+        }
+    } else {
+        runner.execute_task_with_retry(&task, &[] as &[ContextItem], 1).await
+    };
     let duration_secs = start.elapsed().as_secs_f64();
-
-    // M4: timeout_secs is not enforced here; runner max_turns / session budget
-    // provides the practical wall-clock guard. Documented in suite schema.
+    let trace_events = exec_result
+        .as_ref()
+        .ok()
+        .map(|result| result.thread_events.as_slice())
+        .unwrap_or(&[]);
+    let (transcript_path, trace_summary) =
+        match persist_eval_trace(trace_root, &eval_task.id, attempt, trace_events).await {
+            Ok((path, summary)) => (Some(path), Some(summary)),
+            Err(error) => {
+                tracing::warn!(task_id = %eval_task.id, attempt, error = %error, "failed to persist eval trace");
+                (None, None)
+            }
+        };
+    let cost_usd = exec_result
+        .as_ref()
+        .ok()
+        .and_then(|result| result.total_cost_usd)
+        .filter(|cost| cost.is_finite() && *cost >= 0.0);
 
     let exec_outcome = match &exec_result {
         Ok(result) if matches!(result.outcome, TaskOutcome::Success | TaskOutcome::StoppedNoAction) => RunOutcome::Pass,
@@ -172,15 +255,16 @@ async fn run_eval_task(
 
     if exec_outcome == RunOutcome::Pass {
         let probes = build_probes(eval_task);
-        if !probes.is_empty() && !probes.iter().all(|p| p.check(&config.workspace)) {
+        if !probes.is_empty() && !probes.iter().all(|p| p.check(workspace)) {
             return EvalRunResult {
                 task_id: eval_task.id.clone(),
                 outcome: RunOutcome::Fail,
-                transcript_path: None,
-                cost_usd: None,
+                transcript_path,
+                cost_usd,
                 duration_secs,
-                attempt: 0,
+                attempt,
                 error_message: Some("Environment probes failed after agent claimed success".into()),
+                trace_summary,
             };
         }
     }
@@ -188,25 +272,73 @@ async fn run_eval_task(
     EvalRunResult {
         task_id: eval_task.id.clone(),
         outcome: exec_outcome,
-        transcript_path: None,
-        cost_usd: None,
+        transcript_path,
+        cost_usd,
         duration_secs,
-        attempt: 0,
+        attempt,
         error_message: None,
+        trace_summary,
     }
 }
 
 /// M1: DRY helper for error EvalRunResult construction.
-fn eval_error(task_id: &str, start: Instant, message: String) -> EvalRunResult {
+fn eval_error(task_id: &str, start: Instant, attempt: u32, message: String) -> EvalRunResult {
     EvalRunResult {
         task_id: task_id.into(),
         outcome: RunOutcome::Error,
         transcript_path: None,
         cost_usd: None,
         duration_secs: start.elapsed().as_secs_f64(),
-        attempt: 0,
+        attempt,
         error_message: Some(message),
+        trace_summary: None,
     }
+}
+
+async fn persist_eval_trace(
+    trace_root: &Path,
+    task_id: &str,
+    attempt: u32,
+    events: &[ThreadEvent],
+) -> Result<(String, HarnessTraceSummary)> {
+    let trusted_root = vtcode_commons::canonicalize(trace_root)
+        .with_context(|| format!("resolve eval trace root {}", trace_root.display()))?;
+
+    let task_component = task_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let task_component = if task_component.is_empty() {
+        "task"
+    } else {
+        &task_component
+    };
+    let file_name = format!("{task_component}-attempt-{attempt}-{}.jsonl", uuid::Uuid::new_v4().simple());
+    let mut jsonl = String::new();
+    for event in events {
+        let line = serde_json::to_string(event).context("serialize eval trace event")?;
+        jsonl.push_str(&line);
+        jsonl.push('\n');
+    }
+    let relative_path = Path::new(".vtcode").join("eval").join("traces").join(&file_name);
+    let write_root = trusted_root.clone();
+    let write_path = relative_path.clone();
+    let contents = jsonl.as_bytes().to_vec();
+    tokio::task::spawn_blocking(move || {
+        vtcode_commons::fs::bound_file::write_file_beneath(&write_root, &write_path, &contents)
+    })
+    .await
+    .context("eval trace write task panicked")?
+    .with_context(|| format!("write eval trace {}", trusted_root.join(&relative_path).display()))?;
+    let path = trusted_root.join(&relative_path);
+    let summary = analyze_jsonl(&jsonl).context("analyze persisted eval trace")?;
+    Ok((path.to_string_lossy().into_owned(), summary))
 }
 
 /// Build environment probes from an eval task's verify commands.
@@ -257,5 +389,37 @@ mod tests {
             timeout_secs: None,
         };
         assert!(build_probes(&task).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn persist_eval_trace_rejects_symlinked_trace_components() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        std::fs::create_dir_all(workspace.path().join(".vtcode")).expect("create metadata directory");
+        symlink(outside.path(), workspace.path().join(".vtcode").join("eval")).expect("create eval symlink");
+
+        let result = persist_eval_trace(workspace.path(), "task", 1, &[]).await;
+        assert!(result.is_err(), "trace persistence must reject symlinked eval directories");
+        assert!(
+            std::fs::read_dir(outside.path())
+                .expect("read outside directory")
+                .next()
+                .is_none()
+        );
+
+        std::fs::remove_file(workspace.path().join(".vtcode").join("eval")).expect("remove eval symlink");
+        std::fs::remove_dir(workspace.path().join(".vtcode")).expect("remove metadata directory");
+        symlink(outside.path(), workspace.path().join(".vtcode")).expect("create metadata symlink");
+        let result = persist_eval_trace(workspace.path(), "task", 1, &[]).await;
+        assert!(result.is_err(), "trace persistence must reject symlinked metadata directories");
+        assert!(
+            std::fs::read_dir(outside.path())
+                .expect("read outside directory")
+                .next()
+                .is_none()
+        );
     }
 }

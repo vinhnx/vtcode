@@ -64,7 +64,7 @@ impl OpenAiCompatSpec for ZaiSpec {
     }
 
     fn insert_reasoning(
-        _core: &OpenAiCompatCore<Self>,
+        core: &OpenAiCompatCore<Self>,
         request: &LLMRequest,
         payload: &mut Map<String, Value>,
     ) -> Result<(), LLMError> {
@@ -81,10 +81,25 @@ impl OpenAiCompatSpec for ZaiSpec {
 
             use crate::rig_adapter::RigProviderCapabilities;
             use vtcode_config::models::Provider;
-            if let Some(reasoning_params) =
-                RigProviderCapabilities::new(Provider::ZAI, &request.model).reasoning_parameters(effort)
-                && let Some(params_obj) = reasoning_params.as_object()
-            {
+            let supported = crate::provider::catalog_or_explicit_reasoning_efforts(
+                Self::KEY,
+                &request.model,
+                core.model_behavior
+                    .as_ref()
+                    .and_then(|behavior| behavior.model_supports_reasoning_effort)
+                    .unwrap_or(false),
+            );
+            let reasoning_params = RigProviderCapabilities::new(Provider::ZAI, &request.model)
+                .reasoning_parameters_for_supported_efforts(effort, supported)
+                ?
+                .ok_or_else(|| LLMError::InvalidRequest {
+                    message: format!(
+                        "Reasoning effort `{effort}` is unsupported for Z.AI model `{}`; choose one of low, high, or max",
+                        request.model
+                    ),
+                    metadata: None,
+                })?;
+            if let Some(params_obj) = reasoning_params.as_object() {
                 for (k, v) in params_obj {
                     payload.insert(k.clone(), v.clone());
                 }
@@ -272,21 +287,27 @@ mod tests {
     }
 
     #[test]
-    fn payload_maps_xhigh_and_max_to_native_max() {
+    fn payload_rejects_unsupported_xhigh_and_preserves_max() {
         let provider = ZAIProvider::new("test-key".to_string());
-        for effort in [ReasoningEffortLevel::XHigh, ReasoningEffortLevel::Max] {
-            let request = LLMRequest {
-                model: models::zai::GLM_5_3.to_string(),
-                messages: vec![Message::user("hello".to_string())].into(),
-                reasoning_effort: Some(effort),
-                ..Default::default()
-            };
+        let unsupported = LLMRequest {
+            model: models::zai::GLM_5_3.to_string(),
+            messages: vec![Message::user("hello".to_string())].into(),
+            reasoning_effort: Some(ReasoningEffortLevel::XHigh),
+            ..Default::default()
+        };
+        let error = provider
+            .core
+            .convert_request(&unsupported)
+            .expect_err("unsupported effort must be blocked before transport");
+        assert!(error.to_string().contains("unsupported"));
 
-            let payload = provider.core.convert_request(&request).expect("payload should be valid");
-            assert_eq!(payload.get("thinking").and_then(|v| v.get("type")).and_then(|v| v.as_str()), Some("enabled"));
-            // `xhigh` aliases to native `max`.
-            assert_eq!(payload.get("reasoning_effort").and_then(|v| v.as_str()), Some("max"));
-        }
+        let supported = LLMRequest {
+            reasoning_effort: Some(ReasoningEffortLevel::Max),
+            ..unsupported
+        };
+        let payload = provider.core.convert_request(&supported).expect("payload should be valid");
+        assert_eq!(payload.get("thinking").and_then(|v| v.get("type")).and_then(|v| v.as_str()), Some("enabled"));
+        assert_eq!(payload.get("reasoning_effort").and_then(|v| v.as_str()), Some("max"));
     }
 
     #[test]

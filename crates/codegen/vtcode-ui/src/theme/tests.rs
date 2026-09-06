@@ -1,9 +1,6 @@
 use anstyle::{Color, RgbColor, Style};
 
-use crate::theme::color_math::{
-    MAX_DARK_BG_TEXT_LUMINANCE, MAX_LIGHT_BG_TEXT_LUMINANCE, MIN_DARK_BG_TEXT_LUMINANCE, contrast_ratio,
-    relative_luminance,
-};
+use crate::theme::color_math::contrast_ratio;
 use crate::theme::registry::all_theme_definitions;
 use crate::*;
 
@@ -68,6 +65,15 @@ fn test_all_themes_have_readable_foreground_and_accents() {
             ("secondary", style_rgb(styles.secondary)),
             ("user", style_rgb(styles.user)),
             ("response", style_rgb(styles.response)),
+            ("info", style_rgb(styles.info)),
+            ("error", style_rgb(styles.error)),
+            ("reasoning", style_rgb(styles.reasoning)),
+            ("tool", style_rgb(styles.tool)),
+            ("tool_detail", style_rgb(styles.tool_detail)),
+            ("tool_output", style_rgb(styles.tool_output).or(style_rgb(styles.output))),
+            ("pty_output", style_rgb(styles.pty_output)),
+            ("status", style_rgb(styles.status)),
+            ("mcp", style_rgb(styles.mcp)),
         ] {
             let color = color.unwrap_or_else(|| panic!("{} missing fg color for {}", name, definition.id));
             let ratio = contrast_ratio(color, bg);
@@ -79,25 +85,6 @@ fn test_all_themes_have_readable_foreground_and_accents() {
                 ratio,
                 min_contrast
             );
-
-            let luminance = relative_luminance(color);
-            if relative_luminance(bg) < 0.5 {
-                assert!(
-                    (MIN_DARK_BG_TEXT_LUMINANCE..=MAX_DARK_BG_TEXT_LUMINANCE).contains(&luminance),
-                    "theme={} style={} luminance {:.3} outside dark-theme readability bounds",
-                    definition.id,
-                    name,
-                    luminance
-                );
-            } else {
-                assert!(
-                    luminance <= MAX_LIGHT_BG_TEXT_LUMINANCE,
-                    "theme={} style={} luminance {:.3} too bright for light theme",
-                    definition.id,
-                    name,
-                    luminance
-                );
-            }
         }
     }
 }

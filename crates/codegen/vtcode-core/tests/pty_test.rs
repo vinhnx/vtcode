@@ -6,6 +6,7 @@
 use serde_json::json;
 use std::fs;
 use tempfile::TempDir;
+use vtcode_config::CommandsConfig;
 use vtcode_core::tools::ToolRegistry;
 
 async fn temp_registry() -> (TempDir, ToolRegistry) {
@@ -263,6 +264,13 @@ async fn test_pty_output_has_no_ansi_codes() {
 #[tokio::test]
 async fn test_pty_command_not_found_handling() {
     let (_temp, registry) = temp_registry().await;
+    // Keep the command-not-found assertion meaningful while still exercising
+    // the shared command allowlist: explicitly allow this inert fixture name.
+    let mut commands_config = CommandsConfig::default();
+    commands_config
+        .allow_list
+        .push("this_command_definitely_does_not_exist_12345".to_string());
+    registry.apply_commands_config(&commands_config);
 
     // Run a command that definitely doesn't exist
     let result = registry

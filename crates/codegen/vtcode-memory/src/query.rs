@@ -1,7 +1,9 @@
 //! Read-only queries across sessions for analytics and long-term learning.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 use lru::LruCache;
 
@@ -11,7 +13,37 @@ use crate::sessions_root;
 const MANIFEST_CACHE_CAPACITY: usize = 200;
 const MANIFEST_CACHE_NONZERO_CAPACITY: std::num::NonZeroUsize =
     std::num::NonZeroUsize::new(MANIFEST_CACHE_CAPACITY).unwrap();
-static MANIFEST_CACHE: std::sync::OnceLock<Mutex<LruCache<String, SessionSummary>>> = std::sync::OnceLock::new();
+static MANIFEST_CACHE: std::sync::OnceLock<Mutex<LruCache<String, CachedManifest>>> = std::sync::OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct CachedManifest {
+    summary: SessionSummary,
+    signature: ManifestSignature,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManifestSignature {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+fn manifest_signature(path: &Path) -> Option<ManifestSignature> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    Some(ManifestSignature {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    })
+}
+
+/// Invalidate a cached manifest after an atomic replacement.
+pub(crate) fn invalidate_manifest_cache(path: &Path) {
+    if let Some(cache) = MANIFEST_CACHE.get()
+        && let Ok(mut cache) = cache.lock()
+    {
+        let key = path.to_string_lossy();
+        cache.pop(key.as_ref());
+    }
+}
 
 /// Lightweight summary of a single session, read from its `manifest.json`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -81,14 +113,19 @@ pub fn recent_sessions(workspace: &Path, n: usize) -> Vec<SessionSummary> {
     for entry in entries.filter_map(Result::ok) {
         let manifest = entry.path().join("manifest.json");
         let key = manifest.to_string_lossy().into_owned();
-        if let Some(s) = cache.get(&key) {
-            out.push(s.clone());
+        let signature = manifest_signature(&manifest);
+        if let Some(cached) = cache.get(&key)
+            && signature == Some(cached.signature)
+        {
+            out.push(cached.summary.clone());
             continue;
         }
         if let Ok(bytes) = std::fs::read(&manifest)
             && let Ok(s) = serde_json::from_slice::<SessionSummary>(&bytes)
         {
-            cache.put(key, s.clone());
+            if let Some(signature) = signature.or_else(|| manifest_signature(&manifest)) {
+                cache.put(key, CachedManifest { summary: s.clone(), signature });
+            }
             out.push(s);
         }
     }
@@ -135,9 +172,8 @@ pub fn query_facts(workspace: &Path, limit: usize) -> Result<Vec<FactRecord>, Se
 /// for facts matching `query`. Returns up to `max_results` results with
 /// score >= `min_score`, sorted by descending relevance.
 ///
-/// Scoring is based on the number of case-insensitive query matches found
-/// in each fact. A simple BMH-style substring count keeps this zero-dependency
-/// while still surfacing the most-relevant chunks first.
+/// Scoring uses BM25 (`k1=1.2`, `b=0.75`) over tokenized facts. Ties are
+/// deterministic by the stable `session_id:index` chunk identifier.
 pub fn search_memory(
     workspace: &Path,
     query: &str,
@@ -153,9 +189,13 @@ pub fn search_memory(
         return Ok(Vec::new());
     }
 
-    let lowered = query.to_ascii_lowercase();
+    let query_terms = tokenize(query);
+    if query_terms.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut results: Vec<MemorySearchResult> = Vec::new();
     let session_source = String::from("session");
+    let mut documents = Vec::new();
 
     let entries = std::fs::read_dir(&root).map_err(|e| SessionStoreError::io(root.clone(), e))?;
     for entry in entries.filter_map(Result::ok) {
@@ -179,25 +219,76 @@ pub fn search_memory(
                 let Some(fact) = item.get("fact").and_then(|f| f.as_str()) else {
                     continue;
                 };
-                let score = count_substring_matches(fact, &lowered) as f64;
-                if score <= 0.0 || score < min_score {
-                    continue;
-                }
-                results.push(MemorySearchResult {
-                    chunk_id: format!("{session_id}:{idx}"),
-                    path: memory_path.clone(),
-                    start_line: 0,
-                    end_line: 0,
-                    score,
-                    snippet: fact.to_string(),
-                    source: session_source.clone(),
+                documents.push((
+                    format!("{session_id}:{idx}"),
+                    memory_path.clone(),
+                    fact.to_owned(),
+                    tokenize(fact),
                     created_at,
-                });
+                ));
             }
         }
     }
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let document_count = documents.len();
+    if document_count == 0 {
+        return Ok(Vec::new());
+    }
+    let average_length =
+        documents.iter().map(|(_, _, _, terms, _)| terms.len() as f64).sum::<f64>() / document_count as f64;
+    let mut document_frequency: HashMap<String, usize> = HashMap::new();
+    for (_, _, _, terms, _) in &documents {
+        let mut seen = std::collections::HashSet::new();
+        for term in terms {
+            if seen.insert(term.as_str()) {
+                *document_frequency.entry(term.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    let k1 = 1.2;
+    let b = 0.75;
+    for (chunk_id, path, fact, terms, created_at) in documents {
+        let length = terms.len() as f64;
+        let mut term_frequency = HashMap::<&str, usize>::new();
+        for term in &terms {
+            *term_frequency.entry(term.as_str()).or_insert(0) += 1;
+        }
+        let mut score = 0.0;
+        for query_term in &query_terms {
+            let Some(&frequency) = term_frequency.get(query_term.as_str()) else {
+                continue;
+            };
+            let Some(&frequency_in_documents) = document_frequency.get(query_term) else {
+                continue;
+            };
+            let idf = (((document_count - frequency_in_documents) as f64 + 0.5)
+                / (frequency_in_documents as f64 + 0.5)
+                + 1.0)
+                .ln();
+            let denominator = frequency as f64 + k1 * (1.0 - b + b * length / average_length.max(1.0));
+            score += idf * (frequency as f64 * (k1 + 1.0)) / denominator;
+        }
+        if score <= 0.0 || score < min_score {
+            continue;
+        }
+        results.push(MemorySearchResult {
+            chunk_id,
+            path,
+            start_line: 0,
+            end_line: 0,
+            score,
+            snippet: fact,
+            source: session_source.clone(),
+            created_at,
+        });
+    }
+
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+    });
     results.truncate(max_results);
     Ok(results)
 }
@@ -224,6 +315,22 @@ fn count_substring_matches(text: &str, lowered_query: &str) -> usize {
         start += pos + lowered_query.len();
     }
     count
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for character in text.chars() {
+        if character.is_alphanumeric() {
+            current.extend(character.to_lowercase());
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
 }
 
 #[cfg(test)]
@@ -258,7 +365,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].snippet, "the widget is blue");
         assert_eq!(results[0].chunk_id, "s1:0");
-        assert!((results[0].score - 1.0).abs() < f64::EPSILON);
+        assert!(results[0].score > 0.0);
     }
 
     #[test]
@@ -277,7 +384,7 @@ mod tests {
 
         let results = search_memory(dir.path(), "cargo", 10, 0.0).expect("search");
         assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|r| (r.score - 1.0).abs() < f64::EPSILON));
+        assert!(results.iter().all(|r| r.score > 0.0));
     }
 
     #[test]
@@ -325,5 +432,53 @@ mod tests {
         let results = search_memory(dir.path(), "twice", 10, 0.0).expect("search");
         assert_eq!(results.len(), 3);
         assert!(results.windows(2).all(|w| w[0].score >= w[1].score));
+    }
+
+    #[test]
+    fn search_memory_uses_bm25_term_coverage_and_deterministic_ties() {
+        let dir = TempDir::new().expect("tempdir");
+        for (session_id, facts) in [
+            ("s1", vec!["rust cargo tool", "unrelated note"]),
+            ("s2", vec!["cargo build tool"]),
+        ] {
+            let session = crate::session_dir(dir.path(), session_id);
+            std::fs::create_dir_all(session.join(crate::DERIVED_DIR)).expect("mkdir");
+            let memory = serde_json::json!({
+                "grounded_facts": facts.into_iter().map(|fact| serde_json::json!({"fact": fact})).collect::<Vec<_>>()
+            });
+            std::fs::write(
+                session.join(crate::DERIVED_DIR).join("memory.json"),
+                serde_json::to_string(&memory).expect("serialize"),
+            )
+            .expect("write");
+        }
+
+        let results = search_memory(dir.path(), "rust cargo", 10, 0.0).expect("search");
+        assert_eq!(results.first().map(|result| result.chunk_id.as_str()), Some("s1:0"));
+        assert!(results[0].score > results[1].score);
+    }
+
+    #[test]
+    fn recent_sessions_invalidates_manifest_cache_after_replacement() {
+        let dir = TempDir::new().expect("tempdir");
+        let session = crate::session_dir(dir.path(), "cache-session");
+        std::fs::create_dir_all(&session).expect("mkdir");
+        let manifest = serde_json::json!({
+            "session_id": "cache-session",
+            "schema_version": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "turn_count": 1,
+            "event_count": 1,
+            "status": "active"
+        });
+        let path = session.join("manifest.json");
+        std::fs::write(&path, serde_json::to_vec(&manifest).expect("serialize")).expect("write");
+        assert_eq!(recent_sessions(dir.path(), 1)[0].updated_at, "2026-01-01T00:00:00Z");
+
+        let mut replaced = manifest;
+        replaced["updated_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+        std::fs::write(&path, serde_json::to_vec(&replaced).expect("serialize")).expect("replace");
+        assert_eq!(recent_sessions(dir.path(), 1)[0].updated_at, "2099-01-01T00:00:00Z");
     }
 }

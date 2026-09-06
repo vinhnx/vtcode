@@ -1,19 +1,11 @@
 use crate::executor::{CommandCategory, CommandExecutor, CommandInvocation, CommandOutput, ShellKind};
 use crate::policy::CommandPolicy;
 use anyhow::{Context, Result, anyhow, bail};
-use lru::LruCache;
-use parking_lot::Mutex;
 use path_clean::PathClean;
 use shell_escape::escape;
 use std::fs;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use vtcode_commons::{WorkspacePaths, canonicalize};
-
-/// LRU cache for canonicalized paths to reduce fs::canonicalize() calls
-type PathCache = Arc<Mutex<LruCache<PathBuf, PathBuf>>>;
-const PATH_CACHE_CAPACITY: usize = 256;
 
 pub struct BashRunner<E, P> {
     executor: E,
@@ -21,8 +13,6 @@ pub struct BashRunner<E, P> {
     workspace_root: PathBuf,
     working_dir: PathBuf,
     shell_kind: ShellKind,
-    /// Cache for canonicalized paths (capacity: 256)
-    path_cache: PathCache,
 }
 
 impl<E, P> BashRunner<E, P>
@@ -44,9 +34,6 @@ where
             workspace_root: canonical_root.clone(),
             working_dir: canonical_root,
             shell_kind: default_shell_kind(),
-            path_cache: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(PATH_CACHE_CAPACITY).unwrap_or(NonZeroUsize::MIN),
-            ))),
         })
     }
 
@@ -69,23 +56,9 @@ where
         self.shell_kind
     }
 
-    /// Canonicalize a path with LRU caching to reduce filesystem calls
-    fn cached_canonicalize(&self, path: &Path) -> Result<PathBuf> {
-        // Check cache first
-        {
-            let mut cache = self.path_cache.lock();
-            if let Some(cached) = cache.get(path) {
-                return Ok(cached.clone());
-            }
-        }
-
-        // Cache miss - perform canonicalization
-        let canonical = canonicalize(path).with_context(|| format!("failed to canonicalize `{}`", path.display()))?;
-
-        // Store in cache
-        self.path_cache.lock().put(path.to_path_buf(), canonical.clone());
-
-        Ok(canonical)
+    /// Authorization must resolve the current filesystem, never a cached symlink target.
+    fn resolve_canonical_path(&self, path: &Path) -> Result<PathBuf> {
+        canonicalize(path).with_context(|| format!("failed to canonicalize `{}`", path.display()))
     }
 
     pub fn cd(&mut self, path: &str) -> Result<()> {
@@ -97,7 +70,7 @@ where
             bail!("path `{}` is not a directory", candidate.display());
         }
 
-        let canonical = self.cached_canonicalize(&candidate)?;
+        let canonical = self.resolve_canonical_path(&candidate)?;
 
         self.ensure_within_workspace(&canonical)?;
 
@@ -189,7 +162,7 @@ where
         // comparison closes the traversal (`rm ..` from a subdirectory),
         // alias (`/tmp` vs `/private/tmp`) and symlink-to-root cases.
         let target_canonical = if target.exists() {
-            Some(self.cached_canonicalize(&target)?)
+            Some(self.resolve_canonical_path(&target)?)
         } else {
             None
         };
@@ -346,7 +319,7 @@ where
             bail!("path `{}` does not exist", path.display());
         }
 
-        let canonical = self.cached_canonicalize(&path)?;
+        let canonical = self.resolve_canonical_path(&path)?;
 
         self.ensure_within_workspace(&canonical)?;
         Ok(canonical)
@@ -373,12 +346,12 @@ where
         if let Ok(metadata) = fs::symlink_metadata(candidate)
             && metadata.file_type().is_symlink()
         {
-            let canonical = self.cached_canonicalize(candidate)?;
+            let canonical = self.resolve_canonical_path(candidate)?;
             return self.ensure_within_workspace(&canonical);
         }
 
         if candidate.exists() {
-            let canonical = self.cached_canonicalize(candidate)?;
+            let canonical = self.resolve_canonical_path(candidate)?;
             self.ensure_within_workspace(&canonical)
         } else {
             let parent = self.canonicalize_existing_parent(candidate)?;
@@ -402,7 +375,7 @@ where
         let mut current = candidate.parent();
         while let Some(path) = current {
             if path.exists() {
-                return self.cached_canonicalize(path);
+                return self.resolve_canonical_path(path);
             }
             current = path.parent();
         }
@@ -622,6 +595,41 @@ mod tests {
             .map_err(|e| anyhow!("executor lock poisoned: {e}"))?;
         assert_eq!(invocations.len(), 1);
         assert_eq!(invocations[0].category, CommandCategory::CreateDirectory);
+        Ok(())
+    }
+    #[cfg(unix)]
+    #[test]
+    fn symlink_retargeting_cannot_reuse_an_earlier_authorization() -> Result<()> {
+        let root = TempDir::new()?;
+        let outside = TempDir::new()?;
+        let inside = root.path().join("inside");
+        fs::create_dir(&inside)?;
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&inside, &link)?;
+        let executor = RecordingExecutor::default();
+        let runner = BashRunner::new(root.path().to_path_buf(), executor.clone(), AllowAllPolicy)?;
+        runner.ls(Some("link"), false)?;
+        fs::remove_file(&link)?;
+        std::os::unix::fs::symlink(outside.path(), &link)?;
+        assert!(runner.ls(Some("link"), false).is_err());
+        assert!(runner.mkdir("link/new-directory", false).is_err());
+        assert_eq!(executor.invocations.lock().expect("invocations lock").len(), 1);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_command_keeps_metacharacters_inside_a_single_literal_argument() -> Result<()> {
+        let root = TempDir::new()?;
+        let executor = RecordingExecutor::default();
+        let runner = BashRunner::new(root.path().to_path_buf(), executor.clone(), AllowAllPolicy)?;
+        let filename = "literal;$(echo injected)'file";
+        runner.mkdir(filename, false)?;
+        let invocations = executor.invocations.lock().expect("invocations lock");
+        let command = &invocations[0].command;
+        let output = std::process::Command::new("sh").arg("-c").arg(command).output()?;
+        assert!(output.status.success());
+        assert!(runner.workspace_root().join(filename).is_dir());
         Ok(())
     }
 }

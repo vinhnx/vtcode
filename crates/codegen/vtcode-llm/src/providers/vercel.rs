@@ -43,8 +43,8 @@ impl_openai_compat_provider!(VercelProvider, VercelSpec, {
         !models::vercel::NON_REASONING_MODELS.contains(&model)
     }
 
-    fn effective_context_size(&self, _model: &str) -> usize {
-        1_000_000
+    fn effective_context_size(&self, model: &str) -> usize {
+        crate::provider::catalog_context_window("vercel", model, 1_000_000)
     }
 });
 

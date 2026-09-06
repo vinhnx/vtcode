@@ -23,7 +23,8 @@ pub const ENTERPRISE_CONTEXT_WINDOW: usize = 500_000;
 // Compaction Trigger Ratios
 // =========================================================================
 
-/// Default auto-compaction trigger ratio - at 90% prompt pressure, compaction fires.
+/// Legacy auto-compaction ratio retained for compatibility with older strategy
+/// configuration. Runtime threshold resolution is capacity- and reserve-driven.
 pub const DEFAULT_COMPACTION_TRIGGER_RATIO: f64 = 0.90;
 
 // =========================================================================

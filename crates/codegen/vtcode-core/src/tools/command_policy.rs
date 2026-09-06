@@ -3,7 +3,7 @@ use crate::config::CommandsConfig;
 use crate::tools::command_cache::PermissionCache;
 use crate::tools::command_resolver::CommandResolver;
 use regex::Regex;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
@@ -86,7 +86,13 @@ impl CommandPolicyEvaluator {
         if command.is_empty() {
             return false;
         }
-        let command_text = command.join(" ");
+        // Preserve argv boundaries when checking a direct executable. Joining
+        // raw arguments would let punctuation inside an argument (for example
+        // Python's `;` or a quoted string) look like shell operators. Explicit
+        // shell wrappers are handled separately so their script still receives
+        // segment-level validation.
+        let command_text =
+            shell_script_from_argv(command).unwrap_or_else(|| shell_words::join(command.iter().map(String::as_str)));
         self.allows_text(&command_text)
     }
 
@@ -182,6 +188,74 @@ impl CommandPolicyEvaluator {
     }
 }
 
+/// Return the script carried by an explicit shell invocation.
+///
+/// The exec tool accepts both a regular argv request (`["printf", "ok"]`) and
+/// an already-constructed shell request (`["/bin/sh", "-lc", "printf ok"]`).
+/// Command policy must inspect the script in the latter form; matching the
+/// wrapper itself would reject safe commands and could also hide a denied
+/// command behind the shell name.
+fn shell_script_from_argv(command: &[String]) -> Option<String> {
+    let program = command.first()?;
+    let basename = Path::new(program).file_name()?.to_str()?.to_ascii_lowercase();
+    let shell_kind = match basename.as_str() {
+        "sh" | "bash" | "zsh" | "dash" | "ksh" => ShellInvocationKind::Posix,
+        "cmd" | "cmd.exe" => ShellInvocationKind::Cmd,
+        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => ShellInvocationKind::PowerShell,
+        _ => return None,
+    };
+
+    let flag_index = command.iter().enumerate().skip(1).find_map(|(index, argument)| {
+        let is_command_flag = match shell_kind {
+            ShellInvocationKind::Posix => {
+                argument == "-c"
+                    || (argument.starts_with('-')
+                        && !argument.starts_with("--")
+                        && argument.as_bytes().get(1..).is_some_and(|flags| flags.contains(&b'c')))
+            }
+            ShellInvocationKind::Cmd => argument.eq_ignore_ascii_case("/c") || argument.eq_ignore_ascii_case("/k"),
+            ShellInvocationKind::PowerShell => {
+                matches!(argument.to_ascii_lowercase().as_str(), "-command" | "-c" | "-encodedcommand" | "-e")
+            }
+        };
+        is_command_flag.then_some(index)
+    })?;
+
+    command.get(flag_index + 1).cloned()
+}
+
+/// Return whether argv explicitly names a supported shell, even when it does
+/// not carry a `-c` script. Callers use this to preserve the user's shell
+/// boundary while selecting the policy representation.
+pub(crate) fn is_shell_argv(command: &[String]) -> bool {
+    command
+        .first()
+        .and_then(|program| Path::new(program).file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "sh" | "bash"
+                    | "zsh"
+                    | "dash"
+                    | "ksh"
+                    | "cmd"
+                    | "cmd.exe"
+                    | "powershell"
+                    | "powershell.exe"
+                    | "pwsh"
+                    | "pwsh.exe"
+            )
+        })
+}
+
+#[derive(Clone, Copy)]
+enum ShellInvocationKind {
+    Posix,
+    Cmd,
+    PowerShell,
+}
+
 /// Split a command string into its shell segments so prefix/regex policy
 /// rules apply to every chained, piped, or list-joined command rather than
 /// only to the first. Falls back to the whole string when the parser cannot
@@ -275,5 +349,12 @@ mod tests {
         assert!(evaluator.allows_text("cargo"));
         assert!(evaluator.allows(&["git".into()]));
         assert!(evaluator.allows(&["cargo".into()]));
+    }
+
+    #[test]
+    fn shell_wrapper_policy_evaluates_inner_script() {
+        let evaluator = CommandPolicyEvaluator::from_config(&CommandsConfig::default());
+        assert!(evaluator.allows(&["/bin/sh".into(), "-lc".into(), "printf vtcode-terminal".into(),]));
+        assert!(!evaluator.allows(&["/bin/sh".into(), "-lc".into(), "rm -rf /".into(),]));
     }
 }

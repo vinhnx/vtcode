@@ -18,7 +18,7 @@ use anyhow::Result;
 use vtcode_core::core::agent::harness_kernel::SessionToolCatalogSnapshot;
 use vtcode_core::core::agent::runner::prompt_alignment;
 use vtcode_core::prompts::{
-    PromptContext, append_deferred_tools_prompt_section, append_runtime_tool_prompt_sections,
+    PromptContext, append_deferred_tools_prompt_section, append_runtime_tool_prompt_sections_for_model,
     upsert_harness_limits_section,
 };
 
@@ -151,10 +151,17 @@ async fn build_prompt_output(
         #[cfg(feature = "profiling")]
         let _phase_span = tracing::debug_span!(target: "vtcode.prompt", "prompt_assembly.tool_sections").entered();
 
-        append_runtime_tool_prompt_sections(
+        append_runtime_tool_prompt_sections_for_model(
             &mut system_prompt,
             &tool_snapshot,
             !input.turn.prompt_cache_shaping_mode.is_enabled(),
+            ctx.vt_cfg
+                .map(|cfg| cfg.agent.shell_prompt_profile)
+                .unwrap_or_default()
+                .resolve_for_current_platform(),
+            &**ctx.provider_client,
+            &input.turn.active_model,
+            ctx.vt_cfg,
         );
 
         if input.turn.client_local_tool_deferral && !input.turn.tool_free_recovery {

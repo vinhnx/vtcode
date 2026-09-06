@@ -87,7 +87,7 @@ pub use justification::{ApprovalPattern, JustificationManager, ToolJustification
 pub use justification_extractor::JustificationExtractor;
 pub use pty::{PtySessionGuard, PtySessionManager};
 pub use registration::{
-    NativeCgpToolFactory, ToolCatalogSource, ToolExecutorFn, ToolHandler, ToolRegistration,
+    NativeCgpToolFactory, ToolCatalogSource, ToolExecutorFn, ToolHandler, ToolNetworkAccess, ToolRegistration,
     ToolRegistrationSpec as ToolMetadata,
 };
 pub use resiliency::{ResiliencyContext, ToolFailureTracker};

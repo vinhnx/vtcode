@@ -7,6 +7,7 @@ use vtcode_core::config::types::AgentConfig as CoreAgentConfig;
 use vtcode_core::copilot::{CopilotAuthStatusKind, probe_auth_status};
 use vtcode_core::llm::factory::{ProviderConfig, create_provider_with_config};
 use vtcode_core::llm::provider::LLMProvider;
+use vtcode_core::llm::reasoning_effort::ReasoningEffortMapper;
 use vtcode_core::llm::rig_adapter::RigProviderCapabilities;
 use vtcode_core::utils::ansi::{AnsiRenderer, MessageStyle};
 use vtcode_ui::tui::app::{InlineHandle, InlineHeaderContext};
@@ -61,9 +62,9 @@ pub(crate) async fn finalize_model_selection(
     let using_chatgpt_auth = selection.provider_enum == Some(Provider::OpenAI) && openai_chatgpt_auth.is_some();
     let custom_provider_enabled = auth_cfg.custom_provider(&selection.provider).is_some();
     let client_installed = selection.provider_enum.is_some() || custom_provider_enabled;
+    let provider_name = selection.provider.clone();
 
-    if client_installed {
-        let provider_name = selection.provider.clone();
+    let (new_client, rig_payload, reasoning_adjustment) = if client_installed {
         let new_client = create_provider_with_config(
             &provider_name,
             ProviderConfig {
@@ -87,20 +88,58 @@ pub(crate) async fn finalize_model_selection(
             },
         )
         .context("Failed to initialize provider for the selected model")?;
-        *provider_client = new_client;
-        config.provider = provider_name;
+        let mapping = ReasoningEffortMapper::resolve(
+            new_client.as_ref(),
+            &selection.model,
+            selection.reasoning,
+            auth_cfg.agent.allow_reasoning_effort_downgrade,
+        )
+        .with_context(|| {
+            format!(
+                "resolve reasoning effort `{}` for provider `{}` model `{}`",
+                selection.reasoning, provider_name, selection.model
+            )
+        })?;
+        let rig_payload = selection
+            .provider_enum
+            .filter(|_| selection.reasoning != vtcode_core::config::types::ReasoningEffortLevel::None)
+            .map(|provider| {
+                let supported_efforts = new_client.supported_reasoning_efforts(&selection.model);
+                RigProviderCapabilities::new(provider, &selection.model)
+                    .reasoning_parameters_for_supported_efforts(mapping.effective, supported_efforts)
+                    .map(|payload| payload.map(|value| value.to_string()))
+            })
+            .transpose()?
+            .flatten();
+        let reasoning_adjustment = mapping.degraded().then(|| {
+            format!(
+                "Requested reasoning effort `{}` was downgraded to `{}` for {} / {}.",
+                mapping.requested, mapping.effective, provider_name, selection.model
+            )
+        });
+        (Some(new_client), rig_payload, reasoning_adjustment)
     } else {
-        renderer.line(
-            MessageStyle::Info,
-            "Saved selection, but custom providers require manual configuration before taking effect.",
-        )?;
-        config.provider = selection.provider.clone();
-    }
+        (None, None, None)
+    };
 
     // Persist to disk only after provider creation succeeds, so a failure
     // cannot leave vtcode.toml with a partially-updated provider config.
     let updated_cfg = picker.persist_selection(&workspace, &selection).await?;
     *vt_cfg = Some(updated_cfg);
+
+    if let Some(new_client) = new_client {
+        *provider_client = vtcode_core::llm::provider::ContextWindowProvider::wrap(
+            new_client,
+            &selection.model,
+            selection.context_window,
+        );
+    } else {
+        renderer.line(
+            MessageStyle::Info,
+            "Saved selection, but custom providers require manual configuration before taking effect.",
+        )?;
+    }
+    config.provider = provider_name;
 
     config.model = selection.model.clone();
     config.api_key = api_key;
@@ -109,11 +148,11 @@ pub(crate) async fn finalize_model_selection(
     config.openai_chatgpt_auth = openai_chatgpt_auth;
     sync_runtime_custom_api_key(config, &selection);
 
-    if let Some(provider_enum) = selection.provider_enum
-        && selection.reasoning_supported
-        && let Some(payload) =
-            RigProviderCapabilities::new(provider_enum, &selection.model).reasoning_parameters(selection.reasoning)
-    {
+    if let Some(reasoning_adjustment) = reasoning_adjustment {
+        renderer.line(MessageStyle::Info, &reasoning_adjustment)?;
+    }
+
+    if let Some(payload) = rig_payload {
         renderer.line(MessageStyle::Info, &format!("Rig reasoning configuration prepared: {payload}"))?;
     }
 
@@ -438,6 +477,7 @@ mod tests {
             model: "test-model".to_string(),
             model_display: "test-model".to_string(),
             known_model: false,
+            context_window: None,
             reasoning_supported: false,
             reasoning: ReasoningEffortLevel::Medium,
             reasoning_changed: false,

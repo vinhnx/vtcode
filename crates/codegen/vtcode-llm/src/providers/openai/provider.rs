@@ -564,16 +564,11 @@ impl OpenAIProvider {
     }
 
     fn supports_temperature_parameter(model: &str) -> bool {
-        // GPT-6 Astra does not support temperature/top_p/top_logprobs.
-        // https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters
-        if model == models::openai::GPT_6_ASTRA
-            || model == models::openai::GPT_5
-            || model == models::openai::GPT_5_MINI
-            || model == models::openai::GPT_5_NANO
-        {
-            return false;
-        }
-        true
+        vtcode_config::models::model_catalog_entry("openai", model)
+            .map(|entry| entry.supports_sampling)
+            .unwrap_or_else(|| {
+                !matches!(model, models::openai::GPT_5 | models::openai::GPT_5_MINI | models::openai::GPT_5_NANO)
+            })
     }
 
     fn responses_api_state(&self, model: &str) -> ResponsesApiState {
@@ -715,6 +710,7 @@ impl OpenAIProvider {
             supports_parallel_tool_config: self.supports_parallel_tool_config(&request.model),
             supports_temperature: Self::supports_temperature_parameter(&request.model),
             supports_reasoning_effort: self.supports_reasoning_effort(&request.model),
+            supported_reasoning_efforts: self.supported_reasoning_efforts(&request.model),
             supports_reasoning: self.supports_reasoning(&request.model),
             is_responses_api_model: Self::is_responses_api_model(&request.model),
             include_max_output_tokens: is_native_openai,

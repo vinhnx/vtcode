@@ -177,6 +177,14 @@ fn test_provider(base_url: &str, model: &str) -> OpenAIProvider {
     )
 }
 
+#[test]
+fn effective_context_size_uses_catalog_capacity_and_explicit_override() {
+    let provider = OpenAIProvider::new("offline-fixture".to_string());
+    assert_eq!(provider.effective_context_size("gpt-6-astra"), 1_050_000);
+    assert_eq!(provider.effective_context_size("unknown-model"), 128_000);
+    assert_eq!(provider.with_context_window(Some(32_000)).effective_context_size("gpt-6-astra"), 32_000);
+}
+
 fn native_openai_mock_base_url(server: &MockServer) -> String {
     server.uri().replacen("http://", "http://api.openai.com@", 1)
 }
@@ -2746,7 +2754,7 @@ fn supported_models_include_current_reasoning_models() {
     let supported = OpenAIProvider::new("key".to_owned()).supported_models();
     // Current reasoning models must be in the supported list.
     assert!(supported.contains(&"gpt-5.6-sol".to_string()));
-    assert!(supported.contains(&models::openai::GPT_5_CODEX.to_string()));
+    assert!(supported.contains(&models::openai::DEFAULT_MODEL.to_string()));
     // Deprecated o-series models are removed from the picker but retained in
     // REASONING_MODELS for backward-compat routing.
     assert!(!supported.contains(&models::openai::O3.to_string()));
@@ -2945,7 +2953,7 @@ fn responses_payload_uses_max_output_tokens_field() {
 }
 
 #[test]
-fn chatgpt_backend_omits_max_output_tokens_and_maps_minimal_reasoning() {
+fn chatgpt_backend_omits_max_output_tokens_and_blocks_unsupported_minimal_reasoning() {
     let provider = chatgpt_backend_provider(models::openai::GPT_5_CODEX);
     let mut request = sample_request(models::openai::GPT_5_CODEX);
     request.max_tokens = Some(512);
@@ -2953,8 +2961,10 @@ fn chatgpt_backend_omits_max_output_tokens_and_maps_minimal_reasoning() {
 
     request.max_tokens = None;
     request.reasoning_effort = Some(vtcode_config::types::ReasoningEffortLevel::Minimal);
-    let payload = provider.convert_to_openai_responses_format(&request).expect("should succeed");
-    assert_eq!(payload["reasoning"].get("effort").and_then(Value::as_str), Some("low"));
+    let error = provider
+        .convert_to_openai_responses_format(&request)
+        .expect_err("unsupported effort must be blocked without explicit degradation");
+    assert!(error.to_string().contains("unsupported by this route"));
 }
 
 #[test]
@@ -3220,7 +3230,9 @@ async fn manual_compaction_payload_includes_selected_fields_and_appends_instruct
             &provider::ResponsesCompactionOptions {
                 instructions: Some("Terse.".to_string()),
                 max_output_tokens: Some(321),
-                reasoning_effort: Some(vtcode_config::types::ReasoningEffortLevel::Minimal),
+                // GPT-5.6 Sol advertises low as its smallest native effort;
+                // unsupported Minimal requests are rejected before transport.
+                reasoning_effort: Some(vtcode_config::types::ReasoningEffortLevel::Low),
                 verbosity: Some(vtcode_config::types::VerbosityLevel::High),
                 responses_include: Some(vec!["reasoning.encrypted_content".to_string()]),
                 response_store: Some(true),
@@ -3238,7 +3250,7 @@ async fn manual_compaction_payload_includes_selected_fields_and_appends_instruct
     assert_eq!(p["service_tier"], json!("priority"));
     assert_eq!(p["store"], json!(false));
     assert_eq!(p["include"], json!(["reasoning.encrypted_content"]));
-    assert_eq!(p["reasoning"]["effort"], json!("minimal"));
+    assert_eq!(p["reasoning"]["effort"], json!("low"));
     assert_eq!(p["text"]["verbosity"], json!("high"));
     assert_eq!(p["prompt_cache_key"], json!("lineage-key"));
     assert!(p.get("previous_response_id").is_none() && p.get("output_types").is_none() && p.get("stream").is_none());

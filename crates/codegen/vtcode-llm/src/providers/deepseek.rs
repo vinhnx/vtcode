@@ -47,7 +47,7 @@ impl OpenAiCompatSpec for DeepSeekSpec {
     }
 
     fn insert_reasoning(
-        _core: &OpenAiCompatCore<Self>,
+        core: &OpenAiCompatCore<Self>,
         request: &LLMRequest,
         payload: &mut Map<String, Value>,
     ) -> Result<(), LLMError> {
@@ -57,8 +57,16 @@ impl OpenAiCompatSpec for DeepSeekSpec {
             } else {
                 use crate::rig_adapter::RigProviderCapabilities;
                 use vtcode_config::models::Provider;
-                if let Some(params) =
-                    RigProviderCapabilities::new(Provider::DeepSeek, &request.model).reasoning_parameters(effort)
+                let supported = crate::provider::catalog_or_explicit_reasoning_efforts(
+                    Self::KEY,
+                    &request.model,
+                    core.model_behavior
+                        .as_ref()
+                        .and_then(|behavior| behavior.model_supports_reasoning_effort)
+                        .unwrap_or(false),
+                );
+                if let Some(params) = RigProviderCapabilities::new(Provider::DeepSeek, &request.model)
+                    .reasoning_parameters_for_supported_efforts(effort, supported)?
                     && let Some(obj) = params.as_object()
                 {
                     for (k, v) in obj {
@@ -127,17 +135,28 @@ impl_openai_compat_provider!(DeepSeekProvider, DeepSeekSpec, {
             .as_ref()
             .and_then(|b| b.model_supports_reasoning)
             .unwrap_or(false)
+            || vtcode_config::models::model_catalog_entry("deepseek", &normalized).is_some_and(|entry| entry.reasoning)
             || normalized == models::deepseek::DEEPSEEK_V4_PRO
             || normalized == models::deepseek::DEEPSEEK_V4_FLASH_VISION_EXP
     }
 
-    fn supports_reasoning_effort(&self, _model: &str) -> bool {
-        // Same robustness logic for reasoning effort
+    fn supports_reasoning_effort(&self, model: &str) -> bool {
+        let raw = if model.trim().is_empty() {
+            &self.core.model
+        } else {
+            model
+        };
+        let normalized = raw.trim().rsplit('/').next().unwrap_or(raw).trim().to_ascii_lowercase();
+        // Curated catalog effort levels are authoritative for known routes;
+        // retain the legacy flags for explicitly configured or dynamic models.
         self.core
             .model_behavior
             .as_ref()
             .and_then(|b| b.model_supports_reasoning_effort)
             .unwrap_or(false)
+            || vtcode_config::models::model_catalog_entry("deepseek", &normalized)
+                .is_some_and(|entry| !entry.reasoning_efforts.is_empty())
+            || normalized == "deepseek-reasoner"
     }
 
     async fn get_balance(&self) -> Result<Option<vtcode_commons::llm::BalanceInfo>, LLMError> {
@@ -190,9 +209,21 @@ impl_openai_compat_provider!(DeepSeekProvider, DeepSeekSpec, {
 mod tests {
     use super::DeepSeekProvider;
     use crate::provider::{ImageDetail, LLMProvider, LLMRequest, Message, ToolChoice};
+    use crate::reasoning_effort::ReasoningEffortMapper;
     use std::sync::Arc;
     use vtcode_config::constants::models;
     use vtcode_config::types::ReasoningEffortLevel;
+
+    #[test]
+    fn catalog_efforts_are_exposed_to_resolution_and_request_building() {
+        let provider = DeepSeekProvider::new("test-key".to_string());
+        let model = models::deepseek::DEEPSEEK_V4_PRO;
+
+        assert_eq!(provider.supported_reasoning_efforts(model), &["low", "high", "max"]);
+        let mapping = ReasoningEffortMapper::resolve(&provider, model, ReasoningEffortLevel::High, false)
+            .expect("catalog-supported DeepSeek effort should resolve");
+        assert_eq!(mapping.effective, ReasoningEffortLevel::High);
+    }
 
     fn base_request() -> LLMRequest {
         LLMRequest {

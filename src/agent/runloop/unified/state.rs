@@ -107,8 +107,12 @@ pub(crate) struct SessionStats {
     last_tool_catalog_observability: Option<ToolCatalogObservabilityIdentity>,
     recent_touched_files: VecDeque<String>,
     total_usage: HarnessUsage,
+    /// Cache-aware and conservative cost totals for the whole interactive
+    /// session. This must live with the persistent session statistics rather
+    /// than inside one `run_turn_loop` invocation, because each user turn
+    /// re-enters that loop while budget enforcement remains session-scoped.
+    cost_estimate: usage_cost::SessionCostAccumulator,
     total_cost_usd: Option<f64>,
-    cost_warning_emitted: bool,
     budget_warning_emitted: bool,
     stop_reason: Option<String>,
     budget_limit: Option<(f64, f64)>,
@@ -131,6 +135,9 @@ struct RequestEnvelopeIdentity {
     model: String,
     provider: String,
     mode: String,
+    /// Full prompt identity used to refresh dynamic suffix bytes in-place.
+    /// This is deliberately excluded from the stable segment identity below.
+    system_prompt_hash: u64,
     prefix_hash: u64,
     catalog_hash: Option<u64>,
     instruction_digest: u64,
@@ -213,7 +220,7 @@ impl SessionStats {
         instruction_digest: u64,
         stable_prompt_hash: u64,
     ) -> SessionRequestEnvelope {
-        let prefix_hash = hash_value(&(hash_value(&system_prompt), stable_prompt_hash));
+        let system_prompt_hash = hash_value(&system_prompt);
         let source_matches = match (&self.request_envelope_source_tools, &tools) {
             (None, None) => true,
             (Some(previous), Some(current)) => Arc::ptr_eq(previous, current),
@@ -223,7 +230,7 @@ impl SessionStats {
             identity.model == model
                 && identity.provider == provider
                 && identity.mode == mode
-                && identity.prefix_hash == prefix_hash
+                && identity.system_prompt_hash == system_prompt_hash
                 && identity.instruction_digest == instruction_digest
                 && identity.stable_prompt_hash == stable_prompt_hash
         });
@@ -234,17 +241,19 @@ impl SessionStats {
             return envelope.clone();
         }
 
-        let candidate = SessionRequestEnvelope::new(
+        let stable_prefix_hash = hash_value(&(instruction_digest, stable_prompt_hash));
+        let candidate = SessionRequestEnvelope::with_prefix_hash(
             "candidate",
             system_prompt,
             tools.as_ref().map_or_else(Vec::new, |tools| tools.as_ref().clone()),
             instruction_digest,
-        )
-        .with_capability_digest(stable_prompt_hash);
+            stable_prefix_hash,
+        );
         let identity = RequestEnvelopeIdentity {
             model: model.to_string(),
             provider: provider.to_string(),
             mode: mode.to_string(),
+            system_prompt_hash,
             prefix_hash: candidate.prefix_hash(),
             catalog_hash: candidate.catalog_hash(),
             instruction_digest,
@@ -257,24 +266,44 @@ impl SessionStats {
             return envelope.clone();
         }
 
-        if let Some(previous_identity) = self.request_envelope_identity.as_ref() {
+        let same_stable_segment = self.request_envelope_identity.as_ref().is_some_and(|previous| {
+            previous.model == identity.model
+                && previous.provider == identity.provider
+                && previous.mode == identity.mode
+                && previous.prefix_hash == identity.prefix_hash
+                && previous.catalog_hash == identity.catalog_hash
+                && previous.instruction_digest == identity.instruction_digest
+                && previous.stable_prompt_hash == identity.stable_prompt_hash
+        });
+        if let Some(previous_identity) = self.request_envelope_identity.as_ref()
+            && !same_stable_segment
+        {
             let boundary_reason = request_identity_boundary_reason(previous_identity, &identity);
             self.begin_request_segment(boundary_reason);
         }
 
-        let segment_id = if let Some(pending_segment_id) = self.pending_request_segment_id.take() {
+        let segment_id = if same_stable_segment {
+            self.request_envelope
+                .as_ref()
+                .map(|envelope| envelope.segment_id().to_owned())
+                .or_else(|| self.pending_request_segment_id.take())
+                .unwrap_or_else(|| {
+                    self.request_segment_sequence = self.request_segment_sequence.saturating_add(1);
+                    format!("segment-{:08}", self.request_segment_sequence)
+                })
+        } else if let Some(pending_segment_id) = self.pending_request_segment_id.take() {
             pending_segment_id
         } else {
             self.request_segment_sequence = self.request_segment_sequence.saturating_add(1);
             format!("segment-{:08}", self.request_segment_sequence)
         };
-        let envelope = SessionRequestEnvelope::new(
+        let envelope = SessionRequestEnvelope::with_prefix_hash(
             segment_id,
             candidate.system_prompt(),
             candidate.ordered_tools().as_ref().clone(),
-            instruction_digest,
-        )
-        .with_capability_digest(stable_prompt_hash);
+            candidate.instruction_digest(),
+            candidate.prefix_hash(),
+        );
         self.request_envelope_identity = Some(identity);
         self.request_envelope_source_tools = tools;
         self.request_envelope = Some(envelope.clone());
@@ -328,8 +357,17 @@ impl SessionStats {
         self.total_usage.clone()
     }
 
-    pub(crate) fn set_total_cost_usd(&mut self, cost: Option<f64>) {
-        self.total_cost_usd = cost;
+    /// Add one turn's cost to the session total and update the display value.
+    /// An unpriced turn makes the complete session total unknown and keeps it
+    /// unknown for subsequent turns, so callers cannot accidentally present a
+    /// partial total as the session spend.
+    pub(crate) fn record_cost(
+        &mut self,
+        estimate: Option<usage_cost::SessionCostEstimate>,
+    ) -> Option<usage_cost::SessionCostEstimate> {
+        let total = self.cost_estimate.record(estimate);
+        self.total_cost_usd = total.map(|cost| cost.effective_usd);
+        total
     }
 
     pub(crate) fn total_cost_usd(&self) -> Option<f64> {
@@ -342,14 +380,6 @@ impl SessionStats {
 
     pub(crate) fn stop_reason(&self) -> Option<&str> {
         self.stop_reason.as_deref()
-    }
-
-    pub(crate) fn cost_warning_emitted(&self) -> bool {
-        self.cost_warning_emitted
-    }
-
-    pub(crate) fn mark_cost_warning_emitted(&mut self) {
-        self.cost_warning_emitted = true;
     }
 
     pub(crate) fn budget_warning_emitted(&self) -> bool {
@@ -986,6 +1016,33 @@ mod tests {
         assert_ne!(first.segment_id(), changed.segment_id());
         assert_ne!(first.prefix_hash(), changed.prefix_hash());
         assert_eq!(first.system_prompt(), changed.system_prompt());
+    }
+
+    #[test]
+    fn runtime_suffix_refreshes_without_invalidating_stable_segment() {
+        let mut stats = SessionStats::default();
+        let first = stats.request_envelope_shared(
+            "model",
+            "provider",
+            "build",
+            "fixed\n[Runtime Context]\n- turn: 1".into(),
+            None,
+            7,
+            11,
+        );
+        let second = stats.request_envelope_shared(
+            "model",
+            "provider",
+            "build",
+            "fixed\n[Runtime Context]\n- turn: 2".into(),
+            None,
+            7,
+            11,
+        );
+
+        assert_eq!(first.segment_id(), second.segment_id());
+        assert_eq!(first.prefix_hash(), second.prefix_hash());
+        assert_ne!(first.system_prompt(), second.system_prompt());
     }
 
     #[test]

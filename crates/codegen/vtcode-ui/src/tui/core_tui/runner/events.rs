@@ -1,4 +1,5 @@
-use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::{FutureExt, StreamExt};
@@ -15,65 +16,104 @@ pub(crate) enum TerminalEvent {
     Crossterm(CrosstermEvent),
 }
 
+/// Retain all input events while allowing only one pending redraw tick.
+#[derive(Clone)]
+pub(super) struct EventSender {
+    sender: UnboundedSender<TerminalEvent>,
+    tick_pending: Arc<AtomicBool>,
+}
+
+impl EventSender {
+    pub(super) fn send(&self, event: TerminalEvent) -> Result<(), tokio::sync::mpsc::error::SendError<TerminalEvent>> {
+        let is_tick = matches!(event, TerminalEvent::Tick);
+        if is_tick && self.tick_pending.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let result = self.sender.send(event);
+        if is_tick && result.is_err() {
+            self.tick_pending.store(false, Ordering::Release);
+        }
+        result
+    }
+
+    pub(super) fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct EventChannels {
-    pub(super) tx: UnboundedSender<TerminalEvent>,
-    pub(super) rx_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(super) tx: EventSender,
+    pub(super) rx_paused: Arc<AtomicBool>,
     /// Tracks last input time for adaptive tick rate (milliseconds since session start)
-    pub(super) last_input_elapsed_ms: std::sync::Arc<AtomicU64>,
+    pub(super) last_input_elapsed_ms: Arc<AtomicU64>,
     /// Session start time for calculating elapsed time
     pub(super) session_start: Instant,
 }
 
 impl EventChannels {
-    fn new(tx: UnboundedSender<TerminalEvent>) -> Self {
+    fn new(tx: EventSender) -> Self {
         Self {
             tx,
-            rx_paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            last_input_elapsed_ms: std::sync::Arc::new(AtomicU64::new(0)),
+            rx_paused: Arc::new(AtomicBool::new(false)),
+            last_input_elapsed_ms: Arc::new(AtomicU64::new(0)),
             session_start: Instant::now(),
         }
     }
 
     pub(super) fn pause(&self) {
-        self.rx_paused.store(true, std::sync::atomic::Ordering::Release);
+        self.rx_paused.store(true, Ordering::Release);
     }
 
     pub(super) fn resume(&self) {
-        self.rx_paused.store(false, std::sync::atomic::Ordering::Release);
+        self.rx_paused.store(false, Ordering::Release);
     }
 
     /// Record that user input was received (updates last input timestamp)
     /// Uses Instant-based tracking for efficiency (no syscalls)
     pub(super) fn record_input(&self) {
         let elapsed_ms = self.session_start.elapsed().as_millis() as u64;
-        self.last_input_elapsed_ms
-            .store(elapsed_ms, std::sync::atomic::Ordering::Release);
+        self.last_input_elapsed_ms.store(elapsed_ms, Ordering::Release);
     }
 }
 
 pub(super) struct EventListener {
     receiver: UnboundedReceiver<TerminalEvent>,
+    tick_pending: Arc<AtomicBool>,
 }
 
 impl EventListener {
     pub(super) fn new() -> (Self, EventChannels) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let channels = EventChannels::new(tx);
-        (Self { receiver: rx }, channels)
+        let tick_pending = Arc::new(AtomicBool::new(false));
+        let channels = EventChannels::new(EventSender {
+            sender: tx,
+            tick_pending: Arc::clone(&tick_pending),
+        });
+        (Self { receiver: rx, tick_pending }, channels)
     }
 
     pub(super) async fn recv(&mut self) -> Option<TerminalEvent> {
-        self.receiver.recv().await
+        let event = self.receiver.recv().await?;
+        self.acknowledge(&event);
+        Some(event)
     }
 
     pub(super) fn try_recv(&mut self) -> Result<TerminalEvent, TryRecvError> {
-        self.receiver.try_recv()
+        let event = self.receiver.try_recv()?;
+        self.acknowledge(&event);
+        Ok(event)
+    }
+
+    fn acknowledge(&self, event: &TerminalEvent) {
+        if matches!(event, TerminalEvent::Tick) {
+            self.tick_pending.store(false, Ordering::Release);
+        }
     }
 
     /// Clear all queued events from the input channel
     pub(super) fn clear_queue(&mut self) {
-        while self.receiver.try_recv().is_ok() {
+        while self.try_recv().is_ok() {
             // Keep draining until empty
         }
     }
@@ -145,10 +185,10 @@ impl ScrollAccumulator {
 // Uses crossterm::event::EventStream for async-native event handling
 // Implements adaptive tick rate: 60Hz when active, 10Hz when idle
 pub(super) async fn spawn_event_loop(
-    event_tx: UnboundedSender<TerminalEvent>,
+    event_tx: EventSender,
     cancellation_token: CancellationToken,
-    rx_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    last_input_elapsed_ms: std::sync::Arc<AtomicU64>,
+    rx_paused: Arc<AtomicBool>,
+    last_input_elapsed_ms: Arc<AtomicU64>,
     session_start: Instant,
 ) {
     let mut reader = crossterm::event::EventStream::new();
@@ -160,7 +200,7 @@ pub(super) async fn spawn_event_loop(
 
     loop {
         // Determine current tick rate based on recent activity (using Instant, no syscalls)
-        let last_input = last_input_elapsed_ms.load(std::sync::atomic::Ordering::Acquire);
+        let last_input = last_input_elapsed_ms.load(Ordering::Acquire);
         let is_active = if last_input == 0 {
             false
         } else {
@@ -188,7 +228,7 @@ pub(super) async fn spawn_event_loop(
                 match maybe_event {
                     // Only send if not paused. When paused (e.g., during external editor launch),
                     // skip sending to prevent processing input while the editor is active.
-                    Some(Ok(evt)) if !rx_paused.load(std::sync::atomic::Ordering::Acquire) => {
+                    Some(Ok(evt)) if !rx_paused.load(Ordering::Acquire) => {
                         let _ = event_tx.send(TerminalEvent::Crossterm(evt));
                     }
                     Some(Ok(_)) => {}
@@ -214,6 +254,34 @@ pub(super) async fn spawn_event_loop(
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers, MouseEvent};
+
+    #[test]
+    fn pending_ticks_coalesce_without_dropping_or_reordering_keys() {
+        let (mut listener, channels) = EventListener::new();
+        channels.tx.send(TerminalEvent::Tick).expect("tick");
+        channels
+            .tx
+            .send(TerminalEvent::Crossterm(CrosstermEvent::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))))
+            .expect("key a");
+        for _ in 0..1000 {
+            channels.tx.send(TerminalEvent::Tick).expect("tick");
+        }
+        channels
+            .tx
+            .send(TerminalEvent::Crossterm(CrosstermEvent::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE))))
+            .expect("key b");
+        assert!(matches!(listener.try_recv(), Ok(TerminalEvent::Tick)));
+        for expected in ['a', 'b'] {
+            assert!(
+                matches!(listener.try_recv(), Ok(TerminalEvent::Crossterm(CrosstermEvent::Key(key))) if key.code == KeyCode::Char(expected))
+            );
+        }
+        assert!(listener.try_recv().is_err());
+        channels.tx.send(TerminalEvent::Tick).expect("new tick");
+        listener.clear_queue();
+        channels.tx.send(TerminalEvent::Tick).expect("tick after clear");
+        assert!(matches!(listener.try_recv(), Ok(TerminalEvent::Tick)));
+    }
 
     fn wheel(kind: MouseEventKind) -> CrosstermEvent {
         CrosstermEvent::Mouse(MouseEvent {

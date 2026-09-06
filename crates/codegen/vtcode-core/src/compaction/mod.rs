@@ -8,6 +8,7 @@ use vtcode_config::constants::context::DEFAULT_COMPACTION_TRIGGER_RATIO;
 use crate::config::types::{ReasoningEffortLevel, VerbosityLevel};
 use crate::exec::events::CompactionMode;
 use crate::llm::provider::{LLMProvider, LLMRequest, Message, MessageContent, MessageRole, ResponsesCompactionOptions};
+use crate::llm::reasoning_effort::ReasoningEffortMapper;
 use crate::llm::utils::truncate_to_token_limit;
 
 pub mod auto;
@@ -142,12 +143,29 @@ pub async fn compact_history(
     history: &[Message],
     config: &CompactionConfig,
 ) -> Result<Vec<Message>> {
+    compact_history_with_budget(provider, model, history, config, None).await
+}
+
+/// Compact conversation history while enforcing a caller-resolved context
+/// budget. A positive budget is the complete effective capacity for the
+/// session (provider capacity intersected with any configured session cap),
+/// so native and local compaction retain the same amount of history.
+pub async fn compact_history_with_budget(
+    provider: &dyn LLMProvider,
+    model: &str,
+    history: &[Message],
+    config: &CompactionConfig,
+    context_budget: Option<usize>,
+) -> Result<Vec<Message>> {
     if history.is_empty() {
         return Ok(Vec::new());
     }
 
     if !config.always_summarize && history.len() <= config.keep_last_messages {
-        return Ok(history.to_vec());
+        // Message-count retention is only a fast path. A single large tool
+        // result can exceed the resolved token budget even when the history
+        // contains fewer messages than `keep_last_messages`.
+        return Ok(bound_compacted_history_to_context(history.to_vec(), provider, model, context_budget));
     }
 
     if !config.always_summarize && provider.supports_responses_compaction(model) {
@@ -159,10 +177,11 @@ pub async fn compact_history(
             normalize_provider_compacted_history(compacted, history),
             provider,
             model,
+            context_budget,
         ));
     }
 
-    let effective_config = context_bounded_compaction_config(provider, model, history, config);
+    let effective_config = context_bounded_compaction_config(provider, model, history, config, context_budget);
     let (summary_history, _) = split_continuity_history(history);
     let summary_prompt = build_summary_prompt(summary_history, &effective_config.summary_prompt);
     let request = LLMRequest {
@@ -189,6 +208,7 @@ pub async fn compact_history(
         ),
         provider,
         model,
+        context_budget,
     ))
 }
 
@@ -244,6 +264,11 @@ pub struct ManualCompactionOptions {
     pub max_output_tokens: Option<u32>,
     /// Optional reasoning effort override for the compaction pass.
     pub reasoning_effort: Option<ReasoningEffortLevel>,
+    /// Permit an explicit lower supported effort when the requested level is
+    /// unavailable on the selected provider/model route. The default is
+    /// strict blocking so compaction never silently changes reasoning
+    /// fidelity.
+    pub allow_reasoning_effort_downgrade: bool,
     /// Optional verbosity override for the compaction output.
     pub verbosity: Option<VerbosityLevel>,
 }
@@ -292,9 +317,23 @@ pub async fn compact_history_manual(
     config: &CompactionConfig,
     options: &ManualCompactionOptions,
 ) -> Result<(Vec<Message>, CompactionMode)> {
+    compact_history_manual_with_budget(provider, model, history, config, options, None).await
+}
+
+/// Manual compaction with the resolved session context budget applied to every
+/// provider strategy, including native results and local fallback summaries.
+pub async fn compact_history_manual_with_budget(
+    provider: &dyn LLMProvider,
+    model: &str,
+    history: &[Message],
+    config: &CompactionConfig,
+    options: &ManualCompactionOptions,
+    context_budget: Option<usize>,
+) -> Result<(Vec<Message>, CompactionMode)> {
     if history.is_empty() {
         return Ok((Vec::new(), CompactionMode::Local));
     }
+    let options = resolve_manual_compaction_options(provider, model, options)?;
     match manual_compaction_strategy(provider, model) {
         CompactionStrategy::NativeStandalone => {
             let responses_options: ResponsesCompactionOptions = options.clone().into();
@@ -307,18 +346,52 @@ pub async fn compact_history_manual(
                     normalize_provider_compacted_history(compacted, history),
                     provider,
                     model,
+                    context_budget,
                 ),
                 CompactionMode::Provider,
             ))
         }
         CompactionStrategy::NativeInline => {
-            compact_history_native_inline(provider, model, history, config, options).await
+            compact_history_native_inline(provider, model, history, config, &options, context_budget).await
         }
         CompactionStrategy::Local => {
-            let compacted = summarize_locally(provider, model, history, config, options).await?;
+            let compacted = summarize_locally(provider, model, history, config, &options, context_budget).await?;
             Ok((compacted, CompactionMode::Local))
         }
     }
+}
+
+/// Resolve a manual compaction effort before selecting a provider strategy.
+/// Every strategy eventually emits an `LLMRequest` or provider compaction
+/// options, so validating once at this boundary prevents native, inline, and
+/// hierarchical paths from silently coercing unsupported levels.
+fn resolve_manual_compaction_options(
+    provider: &dyn LLMProvider,
+    model: &str,
+    options: &ManualCompactionOptions,
+) -> Result<ManualCompactionOptions> {
+    let Some(requested) = options.reasoning_effort else {
+        return Ok(options.clone());
+    };
+
+    let mapping = ReasoningEffortMapper::resolve(provider, model, requested, options.allow_reasoning_effort_downgrade)
+        .with_context(|| {
+            format!("Failed to resolve compaction reasoning effort for {} / {}", provider.name(), model)
+        })?;
+
+    if mapping.degraded() {
+        tracing::warn!(
+            provider = provider.name(),
+            model,
+            requested = %mapping.requested,
+            effective = %mapping.effective,
+            "Compaction reasoning effort explicitly downgraded"
+        );
+    }
+
+    let mut resolved = options.clone();
+    resolved.reasoning_effort = Some(mapping.effective);
+    Ok(resolved)
 }
 
 /// Native inline compaction (Anthropic `compact_20260112`).
@@ -334,6 +407,7 @@ async fn compact_history_native_inline(
     history: &[Message],
     config: &CompactionConfig,
     options: &ManualCompactionOptions,
+    context_budget: Option<usize>,
 ) -> Result<(Vec<Message>, CompactionMode)> {
     const ANTHROPIC_COMPACT_TRIGGER_FLOOR: u64 = 50_000;
 
@@ -375,7 +449,7 @@ async fn compact_history_native_inline(
                 "provider-native inline compaction request failed; \
                  falling back to local summarization"
             );
-            let compacted = summarize_locally(provider, model, history, config, options).await?;
+            let compacted = summarize_locally(provider, model, history, config, options, context_budget).await?;
             return Ok((compacted, CompactionMode::Local));
         }
     };
@@ -387,14 +461,17 @@ async fn compact_history_native_inline(
             .map(|summary| summary.trim())
             .filter(|summary| !summary.is_empty())
     {
-        let effective_config = context_bounded_compaction_config(provider, model, history, config);
+        let effective_config = context_bounded_compaction_config(provider, model, history, config, context_budget);
         let compacted = build_summary_compacted_history(history, summary, &effective_config, true);
-        return Ok((bound_compacted_history_to_context(compacted, provider, model), CompactionMode::Provider));
+        return Ok((
+            bound_compacted_history_to_context(compacted, provider, model, context_budget),
+            CompactionMode::Provider,
+        ));
     }
 
     // Compaction did not fire (e.g. history below the minimum trigger threshold);
     // fall back to local summarization so the manual command always succeeds.
-    let compacted = summarize_locally(provider, model, history, config, options).await?;
+    let compacted = summarize_locally(provider, model, history, config, options, context_budget).await?;
     Ok((compacted, CompactionMode::Local))
 }
 
@@ -414,13 +491,19 @@ async fn summarize_locally(
     history: &[Message],
     config: &CompactionConfig,
     options: &ManualCompactionOptions,
+    context_budget: Option<usize>,
 ) -> Result<Vec<Message>> {
     if config.hierarchical {
-        return summarize_locally_hierarchical(provider, model, history, config, options).await;
+        return summarize_locally_hierarchical(provider, model, history, config, options, context_budget).await;
     }
 
-    let effective_config =
-        context_bounded_compaction_config(provider, model, history, &config.clone().with_manual_overrides(options));
+    let effective_config = context_bounded_compaction_config(
+        provider,
+        model,
+        history,
+        &config.clone().with_manual_overrides(options),
+        context_budget,
+    );
     let (summary_history, _) = split_continuity_history(history);
     let summary_prompt = build_summary_prompt(summary_history, &effective_config.summary_prompt);
     let request = LLMRequest {
@@ -442,6 +525,7 @@ async fn summarize_locally(
         build_summary_compacted_history(history, summary, &effective_config, true),
         provider,
         model,
+        context_budget,
     ))
 }
 
@@ -462,9 +546,15 @@ async fn summarize_locally_hierarchical(
     history: &[Message],
     config: &CompactionConfig,
     options: &ManualCompactionOptions,
+    context_budget: Option<usize>,
 ) -> Result<Vec<Message>> {
-    let effective_config =
-        context_bounded_compaction_config(provider, model, history, &config.clone().with_manual_overrides(options));
+    let effective_config = context_bounded_compaction_config(
+        provider,
+        model,
+        history,
+        &config.clone().with_manual_overrides(options),
+        context_budget,
+    );
     let (summary_history, _) = split_continuity_history(history);
 
     // Split history into three bands at roughly equal thirds.
@@ -528,7 +618,7 @@ async fn summarize_locally_hierarchical(
     for message in continuity_tail(history) {
         new_history.push(message.clone());
     }
-    Ok(bound_compacted_history_to_context(new_history, provider, model))
+    Ok(bound_compacted_history_to_context(new_history, provider, model, context_budget))
 }
 
 pub(crate) fn build_summary_prompt(history: &[Message], instructions: &str) -> String {
@@ -557,8 +647,10 @@ pub(crate) fn build_summary_prompt(history: &[Message], instructions: &str) -> S
     formatted
 }
 
-fn compaction_history_budget(provider: &dyn LLMProvider, model: &str) -> Option<usize> {
-    let context_size = provider.effective_context_size(model);
+fn compaction_history_budget(provider: &dyn LLMProvider, model: &str, context_budget: Option<usize>) -> Option<usize> {
+    let context_size = context_budget
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| provider.effective_context_size(model));
     (context_size > 0).then(|| {
         context_size
             .saturating_sub(context_size / COMPACTION_CONTEXT_OVERHEAD_FRACTION_DENOMINATOR)
@@ -571,9 +663,10 @@ fn context_bounded_compaction_config(
     model: &str,
     history: &[Message],
     config: &CompactionConfig,
+    context_budget: Option<usize>,
 ) -> CompactionConfig {
     let mut bounded = config.clone();
-    if let Some(history_budget) = compaction_history_budget(provider, model) {
+    if let Some(history_budget) = compaction_history_budget(provider, model, context_budget) {
         let continuity_tokens = continuity_tail(history).iter().map(Message::estimate_tokens).sum::<usize>();
         bounded.retained_user_message_tokens = bounded
             .retained_user_message_tokens
@@ -586,12 +679,15 @@ fn context_bounded_compaction_config(
 /// results. Native providers can return a large prefix or metadata-heavy tool
 /// calls, so retaining the tail alone is not sufficient to guarantee that the
 /// next request fits.
-fn bound_compacted_history_to_context(
+/// Bound a compacted history to the resolved context budget, including any
+/// caller-supplied session ceiling.
+pub fn bound_compacted_history_to_context(
     compacted: Vec<Message>,
     provider: &dyn LLMProvider,
     model: &str,
+    context_budget: Option<usize>,
 ) -> Vec<Message> {
-    let Some(history_budget) = compaction_history_budget(provider, model) else {
+    let Some(history_budget) = compaction_history_budget(provider, model, context_budget) else {
         return compacted;
     };
     if compacted.iter().map(Message::estimate_tokens).sum::<usize>() <= history_budget {
@@ -1182,8 +1278,8 @@ fn truncate_user_message(message: &Message, token_budget: usize) -> Option<Messa
 #[cfg(test)]
 mod tests {
     use super::{
-        CompactionConfig, ManualCompactionOptions, compact_history, compact_history_manual, continuity_tail,
-        manual_compaction_strategy,
+        COMPACTION_CONTEXT_FIXED_OVERHEAD_TOKENS, CompactionConfig, ManualCompactionOptions, compact_history,
+        compact_history_manual, compact_history_manual_with_budget, continuity_tail, manual_compaction_strategy,
     };
     use crate::config::types::{ReasoningEffortLevel, VerbosityLevel};
     use crate::exec::events::CompactionMode;
@@ -1214,6 +1310,13 @@ mod tests {
     /// Capturing provider with no native support; used to assert the Local summary
     /// request carries the manual options.
     struct CapturingProvider {
+        last_request: Mutex<Option<LLMRequest>>,
+    }
+
+    /// Local summarizer that exposes only the lower reasoning levels. This
+    /// exercises the compaction boundary's strict block and explicit
+    /// downgrade behavior before any hierarchical summary request is sent.
+    struct LimitedReasoningProvider {
         last_request: Mutex<Option<LLMRequest>>,
     }
 
@@ -1303,6 +1406,14 @@ mod tests {
             true
         }
 
+        fn supports_reasoning_effort(&self, _model: &str) -> bool {
+            true
+        }
+
+        fn supported_reasoning_efforts(&self, _model: &str) -> &'static [&'static str] {
+            &["minimal", "low", "medium", "high", "xhigh", "max"]
+        }
+
         async fn compact_history_with_options(
             &self,
             _model: &str,
@@ -1362,6 +1473,42 @@ mod tests {
 
         fn validate_request(&self, _request: &LLMRequest) -> Result<(), LLMError> {
             Ok(())
+        }
+
+        fn supports_reasoning_effort(&self, _model: &str) -> bool {
+            true
+        }
+
+        fn supported_reasoning_efforts(&self, _model: &str) -> &'static [&'static str] {
+            &["minimal", "low", "medium", "high", "xhigh", "max"]
+        }
+    }
+
+    #[async_trait]
+    impl LLMProvider for LimitedReasoningProvider {
+        fn name(&self) -> &str {
+            "limited-reasoning"
+        }
+
+        async fn generate(&self, request: LLMRequest) -> Result<LLMResponse, LLMError> {
+            *self.last_request.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
+            Ok(LLMResponse::new("stub-model", "summary"))
+        }
+
+        fn supported_models(&self) -> Vec<String> {
+            vec!["stub-model".to_string()]
+        }
+
+        fn validate_request(&self, _request: &LLMRequest) -> Result<(), LLMError> {
+            Ok(())
+        }
+
+        fn supports_reasoning_effort(&self, _model: &str) -> bool {
+            true
+        }
+
+        fn supported_reasoning_efforts(&self, _model: &str) -> &'static [&'static str] {
+            &["low", "medium", "high"]
         }
     }
 
@@ -1554,6 +1701,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_compaction_respects_explicit_session_context_budget() {
+        let mut history = Vec::new();
+        for index in 0..24 {
+            history.push(Message::user(format!("request-{index} {}", "context ".repeat(1_200))));
+            history.push(Message::assistant(format!("completed request {index}")));
+        }
+        let provider = ManualStandaloneProvider { last_options: Mutex::new(None) };
+        let (compacted, mode) = compact_history_manual_with_budget(
+            &provider,
+            "stub-model",
+            &history,
+            &CompactionConfig::default(),
+            &ManualCompactionOptions::default(),
+            Some(8_192),
+        )
+        .await
+        .expect("native compaction");
+
+        assert_eq!(mode, CompactionMode::Provider);
+        let estimated_tokens = compacted.iter().map(Message::estimate_tokens).sum::<usize>();
+        assert!(estimated_tokens <= 8_192 - COMPACTION_CONTEXT_FIXED_OVERHEAD_TOKENS);
+    }
+
+    #[tokio::test]
     async fn compact_history_manual_passes_options_to_native_standalone() {
         let history = sample_history();
         let config = CompactionConfig::default();
@@ -1563,6 +1734,7 @@ mod tests {
             max_output_tokens: Some(256),
             reasoning_effort: Some(ReasoningEffortLevel::Minimal),
             verbosity: Some(VerbosityLevel::High),
+            ..ManualCompactionOptions::default()
         };
 
         let (_compacted, mode) = compact_history_manual(&provider, "stub-model", &history, &config, &options)
@@ -1687,6 +1859,7 @@ mod tests {
             max_output_tokens: Some(128),
             reasoning_effort: Some(ReasoningEffortLevel::Minimal),
             verbosity: Some(VerbosityLevel::High),
+            ..ManualCompactionOptions::default()
         };
 
         let (compacted, mode) = compact_history_manual(&provider, "stub-model", &history, &config, &options)
@@ -1703,6 +1876,56 @@ mod tests {
         assert!(prompt.contains("KEEP DECISIONS ONLY"));
         assert!(!prompt.contains("acceptance criteria"));
         assert_eq!(compacted[0].content.as_text(), "Previous conversation summary:\nsummary");
+    }
+
+    #[tokio::test]
+    async fn compact_history_manual_blocks_unsupported_reasoning_before_summary() {
+        let provider = LimitedReasoningProvider { last_request: Mutex::new(None) };
+        let options = ManualCompactionOptions {
+            reasoning_effort: Some(ReasoningEffortLevel::Max),
+            ..ManualCompactionOptions::default()
+        };
+        let error = compact_history_manual(
+            &provider,
+            "stub-model",
+            &sample_history(),
+            &CompactionConfig {
+                always_summarize: true,
+                ..CompactionConfig::default()
+            },
+            &options,
+        )
+        .await
+        .expect_err("unsupported compaction effort must block");
+
+        assert!(
+            error
+                .downcast_ref::<crate::llm::reasoning_effort::ReasoningEffortUnsupported>()
+                .is_some(),
+            "strict compaction failure should preserve the capability diagnostic: {error:#}"
+        );
+        assert!(provider.last_request.lock().unwrap().is_none(), "provider must not receive a blocked request");
+    }
+
+    #[tokio::test]
+    async fn compact_history_manual_downgrades_only_when_explicitly_enabled() {
+        let provider = LimitedReasoningProvider { last_request: Mutex::new(None) };
+        let options = ManualCompactionOptions {
+            reasoning_effort: Some(ReasoningEffortLevel::Max),
+            allow_reasoning_effort_downgrade: true,
+            ..ManualCompactionOptions::default()
+        };
+        let config = CompactionConfig {
+            always_summarize: true,
+            hierarchical: true,
+            ..CompactionConfig::default()
+        };
+        compact_history_manual(&provider, "stub-model", &sample_history(), &config, &options)
+            .await
+            .expect("explicit downgrade should permit compaction");
+
+        let captured = provider.last_request.lock().unwrap().clone().expect("summary request captured");
+        assert_eq!(captured.reasoning_effort, Some(ReasoningEffortLevel::High));
     }
 
     #[tokio::test]

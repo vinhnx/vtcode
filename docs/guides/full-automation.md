@@ -125,9 +125,11 @@ vtcode exec eval --suite my-suite.json --output report.md
 
 The suite JSON file contains an `EvalSuite` with tasks, each specifying a prompt,
 setup/verify commands, and category (capability or regression). The runner
-executes each task through the agent, verifies outcomes with environment probes
-(command exit codes), computes pass@k and pass^k metrics, and outputs a
-markdown report.
+executes each task through the agent with a bounded default concurrency of two,
+verifies outcomes with environment probes (command exit codes), computes
+combinatorial pass@k and independent pass^k metrics per task, and outputs a
+deterministically ordered markdown report. Known per-attempt cost is aggregated;
+unknown pricing is reported separately rather than treated as free.
 
 See [vtcode-eval](../../vtcode-eval/) for the framework and metric definitions.
 

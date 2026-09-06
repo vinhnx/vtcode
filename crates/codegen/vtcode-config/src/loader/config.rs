@@ -1010,8 +1010,9 @@ shell_zsh_fork = false
 
 # Context management configuration - Controls conversation memory
 [context]
-# Session prompt safety budget used by automatic compaction
-# The effective default trigger is 90% of min(this budget, provider capacity)
+# Session prompt safety budget used by automatic compaction.
+# Set to 0 to derive the effective budget from the resolved model/provider
+# capacity; positive values remain an explicit session safety ceiling.
 max_context_tokens = 0
 
 # Percentage to trim context to when it gets too large
