@@ -82,8 +82,11 @@ static SEARCH_RUNTIME_CACHE: OnceLock<Mutex<lru::LruCache<PathBuf, SearchRuntime
 
 pub(crate) fn snapshot_for_workspace(workspace_root: &Path) -> SearchRuntimeSnapshot {
     let workspace_root = workspace_root.to_path_buf();
-    let cache = SEARCH_RUNTIME_CACHE
-        .get_or_init(|| Mutex::new(lru::LruCache::new(std::num::NonZeroUsize::new(SEARCH_RUNTIME_CACHE_CAP).unwrap())));
+    let cache = SEARCH_RUNTIME_CACHE.get_or_init(|| {
+        let capacity = std::num::NonZeroUsize::new(SEARCH_RUNTIME_CACHE_CAP)
+            .expect("SEARCH_RUNTIME_CACHE_CAP is a non-zero const");
+        Mutex::new(lru::LruCache::new(capacity))
+    });
 
     // Check cache first; recover from poison by clearing and returning None to recompute
     {

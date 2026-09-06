@@ -68,12 +68,11 @@ pub(crate) fn normalize_and_validate_tool_args(name: &str, args: &mut Value, pos
         return false;
     }
 
-    if positional_param == Some("command") {
-        if let Some(Value::String(command)) = map.get("command").cloned() {
-            if let Some(array) = normalize_command_string(&command) {
-                map.insert("command".to_string(), Value::Array(array));
-            }
-        }
+    if positional_param == Some("command")
+        && let Some(Value::String(command)) = map.get("command").cloned()
+        && let Some(array) = normalize_command_string(&command)
+    {
+        map.insert("command".to_string(), Value::Array(array));
     }
 
     for required in schema.required_params {

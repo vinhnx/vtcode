@@ -44,4 +44,27 @@ mod tests {
         let suite: EvalSuite = serde_json::from_str(r#"{"id":"s","name":"n","tasks":[],"attempts":0}"#).unwrap();
         assert_eq!(suite.attempts, 0);
     }
+
+    #[test]
+    fn preview_budget_blocked_replan_regression_suite_is_env_verified() {
+        let json = include_str!("../evals/preview-budget-blocked-replan.json");
+        let suite: EvalSuite = serde_json::from_str(json).unwrap();
+        assert_eq!(suite.id, "preview-budget-blocked-replan");
+        assert_eq!(suite.attempts, 3);
+        assert_eq!(suite.tasks.len(), 3);
+        for task in &suite.tasks {
+            assert_eq!(task.category, EvalCategory::Regression);
+            assert!(!task.prompt.is_empty());
+            assert!(!task.verify_commands.is_empty());
+        }
+        let ids: Vec<&str> = suite.tasks.iter().map(|task| task.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "preview-budget-no-retry",
+                "blocked-handoff-resume",
+                "replan-continuation"
+            ]
+        );
+    }
 }

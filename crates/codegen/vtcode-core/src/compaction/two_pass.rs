@@ -90,7 +90,7 @@ fn snap_split_idx_to_tool_boundaries(conversation: &[Message], mut split_idx: us
         let Some(msg) = conversation.get(split_idx - 1) else {
             break;
         };
-        if msg.tool_calls.is_some() && !msg.tool_calls.as_ref().unwrap().is_empty() {
+        if msg.tool_calls.as_ref().is_some_and(|tool_calls| !tool_calls.is_empty()) {
             if conversation.get(split_idx).map(|m| m.tool_call_id.is_some()) != Some(true) {
                 break;
             }

@@ -278,16 +278,15 @@ pub async fn execute_skill_with_sub_llm(
     let tool_definitions = if available_tools.is_empty() {
         None
     } else {
-        Some(Arc::new(available_tools.clone()))
+        Some(Arc::new(available_tools))
     };
     let normalized_user_input = normalized_skill_user_input(&user_input);
 
-    // Build conversation starting with user input
-    let mut messages = vec![Message::user(normalized_user_input)];
-
-    // Create LLM request with skill instructions as system prompt
+    // Create LLM request with skill instructions as system prompt. The message
+    // history stays Arc-shared; pushes go through `Arc::make_mut` so the
+    // request and continuation histories share storage until mutation.
     let mut request = LLMRequest {
-        messages: Arc::new(messages.clone()),
+        messages: Arc::new(vec![Message::user(normalized_user_input)]),
         system_prompt: Some(Arc::from(skill.instructions.clone())),
         tools: tool_definitions.clone(),
         model: model.clone(),
@@ -310,8 +309,7 @@ pub async fn execute_skill_with_sub_llm(
         let is_tool_free_synthesis = tool_free_synthesis_reason.is_some();
 
         if let Some(reason) = tool_free_synthesis_reason {
-            messages.push(Message::user(reason));
-            request.messages = Arc::new(messages.clone());
+            Arc::make_mut(&mut request.messages).push(Message::user(reason));
             request.tools = None;
         } else {
             request.tools = tool_definitions.clone();
@@ -368,9 +366,10 @@ pub async fn execute_skill_with_sub_llm(
 
         // Add assistant response to conversation
         if let Some(tool_calls) = &response.tool_calls {
-            messages.push(Message::assistant_with_tools(content.clone(), tool_calls.clone()));
+            Arc::make_mut(&mut request.messages)
+                .push(Message::assistant_with_tools(content.clone(), tool_calls.clone()));
         } else {
-            messages.push(Message::assistant(content.clone()));
+            Arc::make_mut(&mut request.messages).push(Message::assistant(content.clone()));
         }
 
         // Check if there are tool calls to handle
@@ -390,7 +389,7 @@ pub async fn execute_skill_with_sub_llm(
                         if !skill_tool_scope.permits(&tool_name) {
                             let error = skill_tool_scope.denied_error(skill, &tool_name);
                             warn!(skill = skill.name(), tool = %tool_name, "Blocked out-of-scope skill tool call");
-                            messages
+                            Arc::make_mut(&mut request.messages)
                                 .push(Message::tool_response(tool_call.id.clone(), error.to_json_value().to_string()));
                             force_tool_free_synthesis_reason = Some(skill_tool_free_synthesis_prompt(&format!(
                                 "The tool '{}' is not available for this skill. {}",
@@ -406,7 +405,7 @@ pub async fn execute_skill_with_sub_llm(
                         if let Some(loop_warning) = loop_detector.record_call(&tool_name, &tool_args)
                             && loop_detector.is_hard_limit_exceeded(&tool_name)
                         {
-                            messages.push(Message::tool_response(
+                            Arc::make_mut(&mut request.messages).push(Message::tool_response(
                                 tool_call.id.clone(),
                                 format!("{loop_warning}\n\nTool execution was skipped to prevent a loop."),
                             ));
@@ -434,7 +433,8 @@ pub async fn execute_skill_with_sub_llm(
                         let tool_result = tool_output.to_string();
 
                         // Add tool result to conversation
-                        messages.push(Message::tool_response(tool_call.id.clone(), tool_result));
+                        Arc::make_mut(&mut request.messages)
+                            .push(Message::tool_response(tool_call.id.clone(), tool_result));
                         if let Some(tool_error) = tool_error
                             && should_force_tool_free_synthesis(&tool_error)
                         {
@@ -450,8 +450,8 @@ pub async fn execute_skill_with_sub_llm(
                     }
                 }
 
-                // Update request for next iteration
-                request.messages = Arc::new(messages.clone());
+                // History already lives in `request.messages` via `Arc::make_mut`
+                // pushes above, so no Vec-to-Arc resync is needed here.
                 if let Some(reason) = force_tool_free_synthesis_reason {
                     force_tool_free_synthesis = Some(reason);
                     continue;

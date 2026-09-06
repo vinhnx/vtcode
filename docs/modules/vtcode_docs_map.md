@@ -143,6 +143,10 @@ This document serves as an index of all VT Code documentation. When users ask qu
   - **Topics**: Goals, Performance & Simplicity Rules, Local Workflow, Standalone startup benchmark, Profiling Build
   - **User Questions**: "What can you tell me about Performance Optimization?", "How does Goals work?", "How does Performance & Simplicity Rules work?"
 
+- **File**: `docs/development/preview-budget-blocked-replan.md`
+  - **Content**: Preview Budget, Blocked Turns, and Replans
+  - **User Questions**: "What can you tell me about Preview Budget, Blocked Turns, and Replans?"
+
 - **File**: `docs/development/PROCESS_HARDENING.md`
   - **Content**: Process Hardening
   - **Topics**: Architecture, Security Measures, Implementation Details, Testing, Security Philosophy
@@ -174,8 +178,8 @@ This document serves as an index of all VT Code documentation. When users ask qu
 
 - **File**: `docs/development/tool-summary-display.md`
   - **Content**: Tool Summary Display
-  - **Topics**: Model-visible tool output budget
-  - **User Questions**: "What can you tell me about Tool Summary Display?", "How does Model-visible tool output budget work?"
+  - **Topics**: Model-visible tool output budget, Guardrails quick reference
+  - **User Questions**: "What can you tell me about Tool Summary Display?", "How does Model-visible tool output budget work?", "How does Guardrails quick reference work?"
 
 - **File**: `docs/development/async-performance-audit.md`
   - **Content**: VT Code Async Performance Audit
