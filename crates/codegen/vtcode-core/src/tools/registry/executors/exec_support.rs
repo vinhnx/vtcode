@@ -373,7 +373,7 @@ pub(super) fn enforce_pty_command_policy(display_command: &str, confirm: bool) -
             return Ok(());
         }
         return Err(anyhow!(
-            "Command '{display_command}' is blocked by PTY safety policy. Set confirm=true to force execution."
+            "Command '{display_command}' is blocked by PTY safety policy. Do not self-approve: surface it to the operator, and only retry with confirm=true after the operator explicitly approves this exact command."
         ));
     }
 

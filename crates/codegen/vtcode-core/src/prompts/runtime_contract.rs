@@ -74,8 +74,7 @@ fn append_planning_workflow_notice(prompt: &mut String, request_user_input_enabl
     prompt.push('\n');
     let _ = writeln!(
         prompt,
-        "- Planning raises nonzero per-turn tool-call budgets below {} to {}; this research floor is separate from max_tool_loops and max_conversation_turns.",
-        tool_limits::PLANNING_WORKFLOW_MIN_TOOL_CALLS_PER_TURN,
+        "- Planning uses a nonzero per-turn tool-call research floor of {} that is separate from max_tool_loops and max_conversation_turns.",
         tool_limits::PLANNING_WORKFLOW_MIN_TOOL_CALLS_PER_TURN,
     );
     prompt.push_str(PLANNING_WORKFLOW_INTERVIEW_POLICY_LINE);
@@ -159,7 +158,7 @@ mod tests {
                 },
             );
             assert!(prompt.contains(PLANNING_WORKFLOW_RESEARCH_SCOPE_LINE));
-            assert!(prompt.contains("Planning raises nonzero per-turn tool-call budgets below 120 to 120"));
+            assert!(prompt.contains("Planning uses a nonzero per-turn tool-call research floor of 120"));
         }
     }
 }

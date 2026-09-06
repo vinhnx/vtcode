@@ -217,7 +217,15 @@ impl ToolRegistry {
                 )
                 .await
             {
-                Ok(spooled) => return limit_spooled_preview(spooled, max_output_tokens),
+                Ok(spooled) => {
+                    if spooled.get("spool_path").and_then(Value::as_str).is_some() {
+                        return limit_spooled_preview(spooled, max_output_tokens);
+                    }
+                    // Spooling was skipped (`no_spool` request or spooling
+                    // disabled) while force-spool conditions still fired, so
+                    // the oversized payload must not bypass preview limiting
+                    // and redaction; fall through to standard sanitization.
+                }
                 Err(e) => {
                     // Log error but fall back to standard sanitization
                     tracing::warn!(

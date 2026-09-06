@@ -57,6 +57,22 @@ pub fn strip_tui_display_fields<'a>(tool_name: &str, value: &'a Value) -> Cow<'a
     Cow::Owned(Value::Object(stripped))
 }
 
+/// Hard byte cap on model-visible content. Line truncation alone does not
+/// bound output with very long lines (minified bundles, generated data), so
+/// the provider-visible preview contract needs a byte budget as well.
+const MAX_RESULT_BYTES: usize = 32 * 1024;
+
+fn truncate_utf8_bytes(text: &str, max_bytes: usize) -> (String, bool) {
+    if text.len() <= max_bytes {
+        return (text.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
+}
+
 fn reduce_read_file_result(result: Value) -> Value {
     const MAX_FILE_LINES: usize = 2000;
 
@@ -67,9 +83,12 @@ fn reduce_read_file_result(result: Value) -> Value {
         return result;
     };
 
-    let (content, is_truncated) = truncate_lines(content, MAX_FILE_LINES)
-        .map(|(truncated, _)| (truncated, true))
-        .unwrap_or_else(|| (content.to_string(), false));
+    let (line_truncated, content) = match truncate_lines(content, MAX_FILE_LINES) {
+        Some((truncated, _)) => (true, truncated),
+        None => (false, content.to_string()),
+    };
+    let (content, byte_truncated) = truncate_utf8_bytes(&content, MAX_RESULT_BYTES);
+    let is_truncated = line_truncated || byte_truncated;
 
     let mut reduced = serde_json::Map::new();
     reduced.insert("success".to_string(), Value::Bool(true));
@@ -110,14 +129,22 @@ fn reduce_command_result(result: Value) -> Value {
     let Some(stream) = obj.get(stream_key).and_then(Value::as_str) else {
         return result;
     };
-    let Some((truncated, lines_count)) = truncate_lines(stream, MAX_FILE_LINES) else {
-        return result;
+
+    let (line_truncated, lines_count, stream) = match truncate_lines(stream, MAX_FILE_LINES) {
+        Some((truncated, lines_count)) => (true, lines_count, truncated),
+        None => (false, 0, stream.to_string()),
     };
+    let (stream, byte_truncated) = truncate_utf8_bytes(&stream, MAX_RESULT_BYTES);
+    if !line_truncated && !byte_truncated {
+        return result;
+    }
 
     let mut reduced = obj.clone();
-    reduced.insert(stream_key.to_string(), Value::String(truncated));
+    reduced.insert(stream_key.to_string(), Value::String(stream));
     reduced.insert("is_truncated".to_string(), Value::Bool(true));
-    reduced.insert("original_lines".to_string(), Value::Number(serde_json::Number::from(lines_count as u64)));
+    if line_truncated {
+        reduced.insert("original_lines".to_string(), Value::Number(serde_json::Number::from(lines_count as u64)));
+    }
     reduced.insert("note".to_string(), Value::String("Command output truncated for context economy.".to_string()));
     Value::Object(reduced)
 }

@@ -318,6 +318,16 @@ impl ToolRegistry {
         }
 
         let sandbox_request = self.resolve_exec_sandbox_request(payload).await?;
+        if sandbox_request.sandbox_permissions.requires_escalated_permissions() {
+            // Fail closed: the plan's escalation approval_reason is exposed
+            // for approval queries but no enforced approval flow consumes it
+            // on this run path, so a model-supplied escalation must not
+            // execute unsandboxed on its own justification string.
+            return Err(anyhow!(
+                "sandbox_permissions '{:?}' requires an enforced operator approval decision, which is not connected to this execution path; rerun without sandbox_permissions or wire the approval flow before escalating",
+                sandbox_request.sandbox_permissions
+            ));
+        }
         let output_config = exec_run_output_config(payload, &prepared_command.display_command);
 
         enforce_pty_command_policy(&prepared_command.display_command, confirm)?;

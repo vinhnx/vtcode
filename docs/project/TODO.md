@@ -66,48 +66,27 @@ Evidence: Session replay can't show touched files
 
 ====
 
-You are improving VT Code itself (/Users/vinhnguyenxuan/Developer/learn-by-doing/vtcode, Cargo workspace ~30 crates, Rust 1.88, edition 2024).
-
-Bias to action: infer intent and carry to completion. Treat "can you...", "help me..." as do-it orders. Do concrete reviewable work before asking; approval is final step only for irreversible/destructive. Reversible/read-only/fixes need no permission.
-
-User instructions > AGENTS.md > SKILL.md. If a skill makes you pause/diverge, quote SKILL.md path + line and continue per user intent.
-
-Delegate in parallel whenever independent via collaboration tools. Messages to subagents must be legible.
-
-Do not over-test: no tests for reversible low-impact mirrors. Run: ./scripts/check-dev.sh, cargo nextest run -p <crate> (never cargo test), cargo check --locked with RUSTFLAGS="-D warnings".
-
-Task: find top 5 self-improvements across agent-loop, tools, prompts, safety that reduce tokens + failures. Output table: problem|evidence file:line|fix|verify cmd. Then implement #1 surgically with Conventional Commits style, 4-space, anyhow::Result+with_context, CompactString for small strings, preserve vtcode-exec-events::ThreadEvent contract.
-
 ===
 
 In vtcode + gpt-6-astra (1.05M ctx / 922k max in / 128k out / $10 in / $50 out / reasoning.effort: low,medium,high,xhigh,max):
 Astra is built for exactly this: long multi-step coding, computer-use, multi-agent delegation, with fewer tokens/task than GPT-5.6 Sol. Gotchas for VT Code: >272k in = 2x in + 1.5x out, no temperature/top_p, use Responses API, and it over-asks + over-tests + over-obeys AGENTS.md/SKILL.md by default. 0. Wire it up (once)
 
----
-
-# vtcode.toml
-
-[agent.harness]
-max_parallel_tool_calls = 8 # let Astra parallelize
-
-[models]
-
-# via adding-llm-providers skill: ModelId::all_models() + builtin_model_presets()
-
-# model = "gpt-6-astra", reasoning.effort = "high" for code, "max" for harness/security
-
-# use prompt_cache_options.ttl="30m", keep prefix stable, change effort via configuration_update
-
-Run as: vtcode exec --dry-run "<prompt>" first, then real. Discover tools via vtcode schema tools.
-
 ===
 
-2. 1M-context architecture audit
+1. 1M-context architecture audit
    reasoning.effort=xhigh. Use file_search + code_search, not full-file dumps.
 
 Audit crates/codegen/vtcode-core/core/agent/, tools/, llm/, prompts/sections + guidelines.rs:22, runtime_guidance.rs:7 against docs/harness/ARCHITECTURAL_INVARIANTS.md, docs/guides/agent-loop-contract.md.
 
 Find: duplicate types vs ThreadEvent, prompt bloat >256 tokens, spool/preview budget leaks, sync fs in async paths, policy bypasses. Return: 10 findings ranked by blast radius with file:line + minimal patch via apply_patch.
+
+Notable findings:
+The 32 KiB per-turn aggregate preview budget does not exist — no byte ledger is ever incremented or consulted; every call independently gets a 40 KiB default (200 KiB if requested). Enforcing it needs a per-turn ledger in ToolRegistry (registry/mod.rs:182, registry/spool_processing.rs:24).
+ThreadEvent::TurnBlocked and ContextReset are never emitted anywhere (events/mod.rs:540 turn_blocked has zero callers; the Open Responses bridge handles both, vtcode-llm/src/open_responses/bridge.rs:140,189 — dead paths). Blocked turns instead emit only the BlockedHandoffWritten harness event (runner/execute_helpers.rs:32).
+tools/handlers/tool_handler.rs:297 ToolEvent ("from Codex") is a parallel item-lifecycle enum used only for tracing; file_change_completed (events/mod.rs:820) is dead code that hardcodes PatchChangeKind::Update.
+unified_exec action:"code" spawns python3/node with no policy check or sandbox plan (executors.rs:421,444); write_stdin has no re-check of the PTY deny list on submitted lines.
+Sync-fs probes in the per-call dedup path (registry/execution_history.rs:300-313) and 3× canonicalize per planning tool call (registry/planning_workflow_checks.rs:138-154) — cold-ish but per-call syscalls.
+Dead prompt code: SectionKind enum in prompts/sections.rs:13-60 (duplicate of the private one in system.rs) and the never-wired few_shot.rs 800-token budget.
 
 ===
 

@@ -63,14 +63,12 @@ pub fn generate_tool_guidelines_for_profile(
     if has_exec {
         lines.push(shell_task_guidance(shell_profile).to_string());
     }
-    if has_exec || has_apply_patch || has_search || has_read_file || has_list_files {
-        lines.push("- Diagnose from evidence; never bypass safeguards.".to_string());
-    }
+    // "Diagnose from evidence; never bypass safeguards" and the
+    // completion-as-checkpoint line are already stated unconditionally in the
+    // Runtime Guidance / operating-profile sections; repeating them here
+    // wastes prompt budget.
     if has_stdin {
         lines.push("- `write_stdin`: reuse the existing `session_id` of an active exec session; prefer the pre-filled `next_wait_args` over `next_continue_args` polling; `spool_complete: false` marks readable partial output; an exited pending spool arrives on a later wait.".to_string());
-    }
-    if has_exec || has_apply_patch {
-        lines.push("- Completion is a checkpoint: keep verification resolved.".to_string());
     }
     if has_search {
         lines.push("- `code_search`: omit unused filters; no empty values (`path: \"\"`).".to_string());
@@ -226,9 +224,6 @@ fn generate_runtime_tool_guidelines_for_profile(
     }
     if has_exec {
         lines.push("- In Planning workflow, use `exec_command` only for read-only verification.".to_string());
-    }
-    if has_exec || has_search || has_read_file || has_list_files {
-        lines.push("- In Planning workflow, diagnose from evidence; never bypass safeguards.".to_string());
     }
     if has_search {
         lines.push("- `code_search`: omit unused filters; no empty values (`path: \"\"`).".to_string());
@@ -397,7 +392,9 @@ mod tests {
         assert!(guidelines.contains("git diff -- <path>"));
         assert!(guidelines.contains("build tools"));
         assert!(guidelines.contains("test tools"));
-        assert!(guidelines.contains("Completion is a checkpoint"));
+        // Completion-as-checkpoint guidance lives in the operating profiles;
+        // the guidelines section no longer repeats it.
+        assert!(!guidelines.contains("Completion is a checkpoint"));
     }
 
     #[test]
@@ -406,7 +403,9 @@ mod tests {
         let guidelines = generate_tool_guidelines(&tools, None);
         assert!(guidelines.contains("Use `apply_patch`"));
         assert!(guidelines.contains("patches small"));
-        assert!(guidelines.contains("verification resolved"));
+        // Completion-as-checkpoint guidance lives in the operating profiles;
+        // the guidelines section no longer repeats it.
+        assert!(!guidelines.contains("verification resolved"));
     }
 
     #[test]

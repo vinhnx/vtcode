@@ -131,7 +131,9 @@ impl CommandTool {
         let confirm_ok = input.confirm.unwrap_or(false);
         let risky_command = is_risky_command(command);
         if risky_command && !confirm_ok {
-            return Err(anyhow!("Command appears destructive; set the `confirm` field to true to proceed."));
+            return Err(anyhow!(
+                "Command appears destructive. Do not self-approve: surface it to the operator, and only retry with `confirm: true` after the operator explicitly approves this exact command."
+            ));
         }
 
         let policy_allowed = self.policy.allows(command);
@@ -352,7 +354,7 @@ mod tests {
             .prepare_invocation(&input)
             .await
             .expect_err("git reset --hard should require confirmation");
-        assert!(error.to_string().contains("set the `confirm` field"));
+        assert!(error.to_string().contains("Do not self-approve"));
     }
 
     #[tokio::test]

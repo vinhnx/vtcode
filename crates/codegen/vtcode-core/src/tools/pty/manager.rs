@@ -438,6 +438,11 @@ impl PtyManager {
         let candidate = self.workspace_root.join(requested);
         let normalized = ensure_path_within_workspace(&candidate, &self.workspace_root)
             .map_err(|e| anyhow!("Working directory '{}' escapes the workspace root: {e}", candidate.display()))?;
+        // Symlink-aware containment: a symlinked directory inside the
+        // workspace must not move the command cwd outside it.
+        vtcode_commons::paths::ensure_path_within_workspace_resolved(&normalized, &self.workspace_root)
+            .await
+            .map_err(|e| anyhow!("Working directory '{}' escapes the workspace root: {e}", candidate.display()))?;
         let metadata = tokio::fs::metadata(&normalized)
             .await
             .with_context(|| format!("Working directory '{}' does not exist", normalized.display()))?;

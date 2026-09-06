@@ -96,11 +96,15 @@ impl CommandPolicyEvaluator {
             return false;
         }
 
-        // Deny takes precedence
-        if self.matches_prefix(cmd, &self.deny_prefixes)
-            || Self::matches_any(&self.deny_regexes, cmd)
-            || Self::matches_any(&self.deny_glob_regexes, cmd)
-        {
+        let segments = policy_segments(cmd);
+
+        // Deny takes precedence. Every shell segment is evaluated so chained,
+        // piped, or list-joined commands cannot ride on an earlier match.
+        if segments.iter().any(|segment| {
+            self.matches_prefix(segment, &self.deny_prefixes)
+                || Self::matches_any(&self.deny_regexes, segment)
+                || Self::matches_any(&self.deny_glob_regexes, segment)
+        }) {
             return false;
         }
 
@@ -109,10 +113,12 @@ impl CommandPolicyEvaluator {
             return true;
         }
 
-        // Check allow rules
-        self.matches_prefix(cmd, &self.allow_prefixes)
-            || Self::matches_any(&self.allow_regexes, cmd)
-            || Self::matches_any(&self.allow_glob_regexes, cmd)
+        // Check allow rules: each segment must independently match
+        segments.iter().all(|segment| {
+            self.matches_prefix(segment, &self.allow_prefixes)
+                || Self::matches_any(&self.allow_regexes, segment)
+                || Self::matches_any(&self.allow_glob_regexes, segment)
+        })
     }
 
     /// Enhanced async evaluation with command resolution and caching
@@ -171,9 +177,19 @@ impl CommandPolicyEvaluator {
             .filter(|pattern| !pattern.is_empty())
             .any(|pattern| value.starts_with(pattern))
     }
-
     fn matches_any(regexes: &[Regex], value: &str) -> bool {
         regexes.iter().any(|re| re.is_match(value))
+    }
+}
+
+/// Split a command string into its shell segments so prefix/regex policy
+/// rules apply to every chained, piped, or list-joined command rather than
+/// only to the first. Falls back to the whole string when the parser cannot
+/// handle the syntax, preserving the previous whole-string behavior.
+fn policy_segments(command_text: &str) -> Vec<String> {
+    match crate::command_safety::shell_parser::parse_shell_commands(command_text) {
+        Ok(segments) if !segments.is_empty() => segments.into_iter().map(|argv| argv.join(" ")).collect(),
+        _ => vec![command_text.to_string()],
     }
 }
 

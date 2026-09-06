@@ -171,7 +171,14 @@ impl PipeSessionManager {
         if command.is_empty() {
             return Err(anyhow!("exec session command cannot be empty"));
         }
-        let working_dir = canonicalize_workspace(&working_dir);
+        // Canonicalization does sync fs I/O; keep it off the runtime worker
+        // since this runs per spawned exec session.
+        let working_dir = tokio::task::spawn_blocking({
+            let working_dir = working_dir.clone();
+            move || canonicalize_workspace(&working_dir)
+        })
+        .await
+        .unwrap_or(working_dir);
         self.ensure_within_workspace(&working_dir)?;
 
         // Hold the write lock across check → spawn → insert so two concurrent
