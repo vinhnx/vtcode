@@ -1,6 +1,6 @@
 [package]
 name = "vtcode"
-version = "0.158.0"
+version = "0.158.1"
 edition = "2024"
 rust-version = "1.93.0"
 authors = ["Vinh Nguyen <vinhnguyen2308@gmail.com>"]
@@ -109,29 +109,29 @@ axum = { version = "0.8", features = ["ws"] }
 
 
 # Internal workspace crates
-vtcode-commons = { path = "crates/common/vtcode-commons", version = "0.158.0" }
-vtcode-acp = { path = "crates/codegen/vtcode-acp", version = "0.158.0" }
-vtcode-auth = { path = "crates/codegen/vtcode-auth", version = "0.158.0" }
-vtcode-config = { path = "crates/codegen/vtcode-config", version = "0.158.0" }
-vtcode-core = { path = "crates/codegen/vtcode-core", version = "0.158.0" }
-vtcode-ui = { path = "crates/codegen/vtcode-ui", version = "0.158.0" }
-vtcode-indexer = { path = "crates/codegen/vtcode-indexer", version = "0.158.0" }
-vtcode-bash-runner = { path = "crates/codegen/vtcode-bash-runner", version = "0.158.0" }
-vtcode-exec-events = { path = "crates/common/vtcode-exec-events", version = "0.158.0" }
-vtcode-safety = { path = "crates/codegen/vtcode-safety", version = "0.158.0" }
-vtcode-a2a = { path = "crates/codegen/vtcode-a2a", version = "0.158.0" }
-vtcode-mcp = { path = "crates/codegen/vtcode-mcp", version = "0.158.0" }
-vtcode-llm = { path = "crates/codegen/vtcode-llm", version = "0.158.0" }
-vtcode-skills = { path = "crates/codegen/vtcode-skills", version = "0.158.0" }
-vtcode-memory = { path = "crates/codegen/vtcode-memory", version = "0.158.0" }
-vtcode-eval = { path = "crates/codegen/vtcode-eval", version = "0.158.0" }
-vtcode-webmcp = { path = "crates/codegen/vtcode-webmcp", version = "0.158.0" }
-vtcode-macros = { path = "crates/common/vtcode-macros", version = "0.158.0" }
-vtcode-utility-tool-specs = { path = "crates/common/vtcode-utility-tool-specs", version = "0.158.0" }
-vtcode-agent-plugins = { path = "crates/common/vtcode-agent-plugins", version = "0.158.0" }
+vtcode-commons = { path = "crates/common/vtcode-commons", version = "0.158.1" }
+vtcode-acp = { path = "crates/codegen/vtcode-acp", version = "0.158.1" }
+vtcode-auth = { path = "crates/codegen/vtcode-auth", version = "0.158.1" }
+vtcode-config = { path = "crates/codegen/vtcode-config", version = "0.158.1" }
+vtcode-core = { path = "crates/codegen/vtcode-core", version = "0.158.1" }
+vtcode-ui = { path = "crates/codegen/vtcode-ui", version = "0.158.1" }
+vtcode-indexer = { path = "crates/codegen/vtcode-indexer", version = "0.158.1" }
+vtcode-bash-runner = { path = "crates/codegen/vtcode-bash-runner", version = "0.158.1" }
+vtcode-exec-events = { path = "crates/common/vtcode-exec-events", version = "0.158.1" }
+vtcode-safety = { path = "crates/codegen/vtcode-safety", version = "0.158.1" }
+vtcode-a2a = { path = "crates/codegen/vtcode-a2a", version = "0.158.1" }
+vtcode-mcp = { path = "crates/codegen/vtcode-mcp", version = "0.158.1" }
+vtcode-llm = { path = "crates/codegen/vtcode-llm", version = "0.158.1" }
+vtcode-skills = { path = "crates/codegen/vtcode-skills", version = "0.158.1" }
+vtcode-memory = { path = "crates/codegen/vtcode-memory", version = "0.158.1" }
+vtcode-eval = { path = "crates/codegen/vtcode-eval", version = "0.158.1" }
+vtcode-webmcp = { path = "crates/codegen/vtcode-webmcp", version = "0.158.1" }
+vtcode-macros = { path = "crates/common/vtcode-macros", version = "0.158.1" }
+vtcode-utility-tool-specs = { path = "crates/common/vtcode-utility-tool-specs", version = "0.158.1" }
+vtcode-agent-plugins = { path = "crates/common/vtcode-agent-plugins", version = "0.158.1" }
 
 [workspace.package]
-version = "0.158.0"
+version = "0.158.1"
 edition = "2024"
 rust-version = "1.93.0"
 license = "MIT OR Apache-2.0"
@@ -276,16 +276,16 @@ allow_attributes_without_reason = "warn"
 
 
 [dependencies]
-vtcode-acp = { path = "crates/codegen/vtcode-acp", version = "0.158.0" }
-vtcode-commons = { path = "crates/common/vtcode-commons", version = "0.158.0" }
-vtcode-ui = { path = "crates/codegen/vtcode-ui", version = "0.158.0" }
-vtcode-config = { path = "crates/codegen/vtcode-config", version = "0.158.0" }
-vtcode-auth = { path = "crates/codegen/vtcode-auth", version = "0.158.0" }
-vtcode-core = { path = "crates/codegen/vtcode-core", version = "0.158.0", default-features = false }
-vtcode-webmcp = { path = "crates/codegen/vtcode-webmcp", version = "0.158.0" }
-vtcode-agent-plugins = { path = "crates/common/vtcode-agent-plugins", version = "0.158.0" }
-vtcode-memory = { path = "crates/codegen/vtcode-memory", version = "0.158.0" }
-vtcode-eval = { path = "crates/codegen/vtcode-eval", version = "0.158.0" }
+vtcode-acp = { path = "crates/codegen/vtcode-acp", version = "0.158.1" }
+vtcode-commons = { path = "crates/common/vtcode-commons", version = "0.158.1" }
+vtcode-ui = { path = "crates/codegen/vtcode-ui", version = "0.158.1" }
+vtcode-config = { path = "crates/codegen/vtcode-config", version = "0.158.1" }
+vtcode-auth = { path = "crates/codegen/vtcode-auth", version = "0.158.1" }
+vtcode-core = { path = "crates/codegen/vtcode-core", version = "0.158.1", default-features = false }
+vtcode-webmcp = { path = "crates/codegen/vtcode-webmcp", version = "0.158.1" }
+vtcode-agent-plugins = { path = "crates/common/vtcode-agent-plugins", version = "0.158.1" }
+vtcode-memory = { path = "crates/codegen/vtcode-memory", version = "0.158.1" }
+vtcode-eval = { path = "crates/codegen/vtcode-eval", version = "0.158.1" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
