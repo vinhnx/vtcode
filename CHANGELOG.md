@@ -2,6 +2,24 @@
 
 All notable changes to vtcode will be documented in this file.
 ## v0.73.2 - 2026-01-29
+## 0.158.1 - 2026-09-07
+
+### Highlights
+#### Bug Fixes
+
+- Include history directives in cache prefix hash (0a161d08) 
+#### Features
+
+- Add 32KB byte cap to model-visible tool results (accf5400) 
+- Add per-turn tool preview budget and turn.blocked event (ba328180) 
+- Make runtime behavior model agnostic (7d77ce00) 
+### Other Changes
+#### Other
+
+- Update (859b5a42) 
+#### Refactors
+
+- Share message history via Arc and adopt is_some_and (a233ad6a) 
 ## 0.158.0 - 2026-09-05
 
 ### Highlights
